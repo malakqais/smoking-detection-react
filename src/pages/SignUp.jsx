@@ -149,6 +149,15 @@ const SignUp = () => {
                   required
                 />
               </div>
+              {email.endsWith('@smoker.jr') ? (
+                <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--red)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <i className="fa-solid fa-shield-halved"></i> This email will receive <strong>admin</strong> access
+                </div>
+              ) : email.includes('@') && (
+                <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--tx3)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <i className="fa-solid fa-circle-user"></i> Standard user account
+                </div>
+              )}
             </div>
 
             <div className="fgroup">
