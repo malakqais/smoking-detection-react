@@ -3,6 +3,8 @@
   --nav-bg: #111827;
   --card-bg: #111827;
   --card2: #1e293b;
+  --card: var(--card-bg);
+  --topbar-bg: rgba(7, 11, 13, 0.75);
   --red-main: #DB2D28;
   --red-dark: #A41715;
   --red: #ef4444;
@@ -26,6 +28,8 @@
   --nav-bg: #ffffff;
   --card-bg: #ffffff;
   --card2: #f1f5f9;
+  --card: var(--card-bg);
+  --topbar-bg: rgba(241, 245, 249, 0.75);
   --border: rgba(0, 0, 0, 0.08);
   --tx1: #0f172a;
   --tx2: #475569;
@@ -88,7 +92,7 @@ a { text-decoration: none; color: inherit; }
 [data-theme="light"] .sb-collapse-btn { box-shadow: 3px 0 10px rgba(0,0,0,0.07); }
 
 /* Top Bar */
-.top-bar { height: 68px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; padding: 0 24px; position: sticky; top: 0; background: var(--main-bg); z-index: 100; backdrop-filter: blur(8px); }
+.top-bar { height: 68px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; padding: 0 24px; position: sticky; top: 0; background: var(--topbar-bg); z-index: 100; backdrop-filter: blur(8px); }
 .tb-left { display: flex; align-items: center; gap: 16px; }
 .pg-title { font-size: 18px; font-weight: 800; color: var(--tx1); }
 .pg-sub { font-size: 12px; color: var(--tx3); }

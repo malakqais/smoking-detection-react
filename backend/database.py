@@ -47,7 +47,7 @@ def insert_violation(timestamp, image_path, person_name="Unknown", location="Unk
 def get_user_email(name):
     conn = sqlite3.connect('violations.db')
     cursor = conn.cursor()
-    cursor.execute("SELECT email FROM team WHERE name = ?", (name,))
+    cursor.execute("SELECT email FROM users WHERE name = ?", (name,))
     result = cursor.fetchone()
     conn.close()
     return result[0] if result else None

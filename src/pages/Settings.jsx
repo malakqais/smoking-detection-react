@@ -28,6 +28,14 @@ const MODELS = [
   { name: 'face_best.pt',       label: 'Face ID',    color: '#3b82f6' },
 ];
 
+const ALARM_TONES = [
+  { id: 'high_beep',        name: 'High Beep (Default)', desc: 'Piercing sine frequency warning tone', color: 'var(--red)' },
+  { id: 'double_pulse',     name: 'Double Pulse',        desc: 'Rapid dual-pulse square frequency warning', color: 'var(--amber)' },
+  { id: 'cyber_siren',      name: 'Cyber Siren',         desc: 'Dynamic frequency sweeps and slides alert', color: 'var(--blue)' },
+  { id: 'soft_chime',       name: 'Soft Chime',          desc: 'Gentle triangle melodic decay chime', color: 'var(--green)' },
+  { id: 'nuclear_meltdown', name: 'Nuclear Meltdown',    desc: 'Heavy low-modulated pulsing warning', color: 'var(--amber)' },
+];
+
 const Toggle = ({ checked, onChange }) => (
   <div className="form-check form-switch mb-0">
     <input className="form-check-input" type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)} style={{ cursor: 'pointer' }} />
@@ -64,8 +72,9 @@ const Settings = () => {
   // Appearance (theme is already in state above)
 
   // Notifications
-  const [emailAlerts, setEmailAlerts] = useState(true);
-  const [soundAlerts, setSoundAlerts] = useState(true);
+  const [emailAlerts, setEmailAlerts] = useState(() => localStorage.getItem('emailAlerts') !== 'false');
+  const [soundAlerts, setSoundAlerts] = useState(() => localStorage.getItem('soundAlerts') !== 'false');
+  const [alarmTone, setAlarmTone] = useState(() => localStorage.getItem('alarmTone') || 'high_beep');
   const [alertCooldown, setAlertCooldown] = useState(60);
   const [smtpSender, setSmtpSender] = useState('');
   const [smtpAppPass, setSmtpAppPass] = useState('');
@@ -79,23 +88,40 @@ const Settings = () => {
   const [enabledClasses, setEnabledClasses] = useState({ cigarette: true, smoke: true, vape: true });
 
   // Security
-  const [twoFA, setTwoFA] = useState(false);
-  const [autoLogout, setAutoLogout] = useState(true);
-  const [logoutTimeout, setLogoutTimeout] = useState(30);
-  const [loginNotif, setLoginNotif] = useState(true);
+  const [twoFA, setTwoFA] = useState(() => user.two_factor_enabled === 1 || localStorage.getItem('twoFA') === 'true');
+  const [autoLogout, setAutoLogout] = useState(() => localStorage.getItem('autoLogout') !== 'false');
+  const [logoutTimeout, setLogoutTimeout] = useState(() => parseInt(localStorage.getItem('logoutTimeout') || '30'));
+  const [loginNotif, setLoginNotif] = useState(() => localStorage.getItem('loginNotif') !== 'false');
+
+  // Google 2FA Setup States
+  const [show2FAModal, setShow2FAModal] = useState(false);
+  const [twoFASecret, setTwoFASecret] = useState('');
+  const [twoFAQrUrl, setTwoFAQrUrl] = useState('');
+  const [twoFACode, setTwoFACode] = useState('');
+  const [twoFAError, setTwoFAError] = useState('');
+  const [verifying2FA, setVerifying2FA] = useState(false);
+
+  // Custom confirmation modal states
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [confirmMessage, setConfirmMessage] = useState("");
+  const [confirmCallback, setConfirmCallback] = useState(null);
 
   // Appearance extras
   const [compactMode, setCompactMode] = useState(false);
 
   // Cameras
-  const [cameras, setCameras] = useState([
-    { id: 0, name: 'Camera 0', location: 'Main Lobby',   enabled: true },
-    { id: 1, name: 'Camera 1', location: 'Parking Area', enabled: false },
-    { id: 2, name: 'Camera 2', location: 'Cafeteria',    enabled: false },
-  ]);
+  const [cameras, setCameras] = useState(() => {
+    const saved = localStorage.getItem('cameras');
+    if (saved) return JSON.parse(saved);
+    return [
+      { id: 0, name: 'Camera 0', location: 'Main Lobby',   enabled: true },
+      { id: 1, name: 'Camera 1', location: 'Parking Area', enabled: false },
+      { id: 2, name: 'Camera 2', location: 'Cafeteria',    enabled: false },
+    ];
+  });
 
   // System
-  const bootTime = useMemo(() => Date.now(), []);
+  const loginTime = useMemo(() => parseInt(localStorage.getItem('loginTime') || Date.now()), []);
   const [uptime, setUptime] = useState('0m 0s');
 
   useEffect(() => {
@@ -104,44 +130,287 @@ const Settings = () => {
   }, [theme]);
 
   useEffect(() => {
+    localStorage.setItem('twoFA', twoFA);
+  }, [twoFA]);
+
+  useEffect(() => {
+    localStorage.setItem('emailAlerts', emailAlerts);
+  }, [emailAlerts]);
+
+  useEffect(() => {
+    localStorage.setItem('soundAlerts', soundAlerts);
+  }, [soundAlerts]);
+
+  useEffect(() => {
+    localStorage.setItem('alarmTone', alarmTone);
+  }, [alarmTone]);
+
+  useEffect(() => {
+    localStorage.setItem('autoLogout', autoLogout);
+  }, [autoLogout]);
+
+  useEffect(() => {
+    localStorage.setItem('logoutTimeout', logoutTimeout);
+  }, [logoutTimeout]);
+
+  useEffect(() => {
+    localStorage.setItem('loginNotif', loginNotif);
+  }, [loginNotif]);
+
+  useEffect(() => {
     const t = setInterval(() => {
-      const e = Math.floor((Date.now() - bootTime) / 1000);
+      const e = Math.floor((Date.now() - loginTime) / 1000);
       const h = Math.floor(e / 3600), m = Math.floor((e % 3600) / 60), s = e % 60;
       setUptime(h > 0 ? `${h}h ${m}m ${s}s` : `${m}m ${s}s`);
     }, 1000);
     return () => clearInterval(t);
-  }, [bootTime]);
+  }, [loginTime]);
 
   const showToast = (msg, ok = true) => {
     setToast({ show: true, msg, ok });
     setTimeout(() => setToast({ show: false, msg: '', ok: true }), 3000);
   };
 
-  const saveAll = () => {
-    if (newPass && newPass !== confirmPass) { showToast('Passwords do not match', false); return; }
-    const updated = { ...user, name };
-    setUser(updated);
-    localStorage.setItem('user', JSON.stringify(updated));
-    if (newPass) { localStorage.setItem('lastPassChange', Date.now()); setNewPass(''); setConfirmPass(''); }
-    showToast('Settings saved successfully');
-  };
-
-  const testSmtp = () => {
-    setSmtpTesting(true);
-    setTimeout(() => { setSmtpTesting(false); showToast('Test email sent to ' + smtpRecipient); }, 1800);
-  };
-
-  const clearHistory = async () => {
-    if (!window.confirm('Permanently delete all violation history? This cannot be undone.')) return;
+  const playTestTone = (toneId) => {
     try {
-      const r = await fetch('/api/violations/clear', { method: 'POST' });
-      if (r.ok) showToast('All violation history cleared');
-      else showToast('Error clearing history', false);
-    } catch { showToast('Network error', false); }
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const now = audioCtx.currentTime;
+
+      if (toneId === 'high_beep') {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(880, now);
+        gain.gain.setValueAtTime(0.5, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.6);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(now + 0.6);
+      } 
+      else if (toneId === 'double_pulse') {
+        const osc1 = audioCtx.createOscillator();
+        const gain1 = audioCtx.createGain();
+        osc1.type = 'square';
+        osc1.frequency.setValueAtTime(660, now);
+        gain1.gain.setValueAtTime(0.3, now);
+        gain1.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
+        osc1.connect(gain1);
+        gain1.connect(audioCtx.destination);
+        osc1.start();
+        osc1.stop(now + 0.25);
+
+        setTimeout(() => {
+          const osc2 = audioCtx.createOscillator();
+          const gain2 = audioCtx.createGain();
+          osc2.type = 'square';
+          osc2.frequency.setValueAtTime(880, now);
+          gain2.gain.setValueAtTime(0.3, now);
+          gain2.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
+          osc2.connect(gain2);
+          gain2.connect(audioCtx.destination);
+          osc2.start();
+          osc2.stop(now + 0.25);
+        }, 180);
+      } 
+      else if (toneId === 'cyber_siren') {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(400, now);
+        osc.frequency.exponentialRampToValueAtTime(1000, now + 0.8);
+        gain.gain.setValueAtTime(0.3, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.8);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(now + 0.8);
+      } 
+      else if (toneId === 'soft_chime') {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(523.25, now);
+        gain.gain.setValueAtTime(0.6, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 1.2);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(now + 1.2);
+      } 
+      else if (toneId === 'nuclear_meltdown') {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(220, now);
+        
+        const lfo = audioCtx.createOscillator();
+        const lfoGain = audioCtx.createGain();
+        lfo.frequency.value = 10;
+        lfoGain.gain.value = 50;
+        lfo.connect(lfoGain);
+        lfoGain.connect(osc.frequency);
+        
+        gain.gain.setValueAtTime(0.4, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.9);
+        
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        lfo.start();
+        osc.start();
+        lfo.stop(now + 0.9);
+        osc.stop(now + 0.9);
+      }
+    } catch (e) {
+      console.error("Audio synthesiser blocked or unsupported", e);
+    }
   };
 
-  const updateCamera = (id, field, val) =>
-    setCameras(prev => prev.map(c => c.id === id ? { ...c, [field]: val } : c));
+  const saveAll = async () => {
+    if (newPass && newPass !== confirmPass) { showToast('Passwords do not match', false); return; }
+    try {
+      const payload = { email: user.email, name };
+      if (newPass) payload.password = newPass;
+
+      const res = await fetch('/api/users/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+      });
+      
+      if (res.ok) {
+          const updated = { ...user, name };
+          setUser(updated);
+          localStorage.setItem('user', JSON.stringify(updated));
+          if (newPass) { localStorage.setItem('lastPassChange', Date.now()); setNewPass(''); setConfirmPass(''); }
+          showToast('Settings saved successfully');
+      } else {
+          showToast('Error saving settings', false);
+      }
+    } catch (e) {
+      showToast('Network error', false);
+    }
+  };
+
+  const handleTwoFAChange = async (enable) => {
+    if (enable) {
+      try {
+        const res = await fetch('/api/2fa/setup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: user.email })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setTwoFASecret(data.secret);
+          setTwoFAQrUrl(data.qr_code_url);
+          setTwoFACode("");
+          setTwoFAError("");
+          setShow2FAModal(true);
+        } else {
+          showToast('Failed to initialize 2FA setup', false);
+        }
+      } catch {
+        showToast('Network error during 2FA setup', false);
+      }
+    } else {
+      try {
+        const res = await fetch('/api/2fa/disable', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: user.email })
+        });
+        if (res.ok) {
+          setTwoFA(false);
+          const updated = { ...user, two_factor_enabled: 0 };
+          setUser(updated);
+          localStorage.setItem('user', JSON.stringify(updated));
+          localStorage.setItem('twoFA', 'false');
+          showToast('Two-factor authentication disabled.');
+        } else {
+          showToast('Failed to disable Two-Factor', false);
+        }
+      } catch {
+        showToast('Network error', false);
+      }
+    }
+  };
+
+  const verify2FA = async (e) => {
+    e.preventDefault();
+    if (twoFACode.length < 6) {
+      setTwoFAError("Please enter the 6-digit code.");
+      return;
+    }
+    setVerifying2FA(true);
+    setTwoFAError("");
+    try {
+      const res = await fetch('/api/2fa/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: user.email, code: twoFACode, secret: twoFASecret })
+      });
+      if (res.ok) {
+        setTwoFA(true);
+        const updated = { ...user, two_factor_enabled: 1 };
+        setUser(updated);
+        localStorage.setItem('user', JSON.stringify(updated));
+        localStorage.setItem('twoFA', 'true');
+        setShow2FAModal(false);
+        showToast('Two-Factor successfully enabled!');
+      } else {
+        const data = await res.json().catch(() => ({ message: "Invalid verification code." }));
+        setTwoFAError(data.message || "Invalid verification code. Please check your app.");
+      }
+    } catch {
+      setTwoFAError("Connection error. Make sure the server is online.");
+    } finally {
+      setVerifying2FA(false);
+    }
+  };
+
+  const testSmtp = async () => {
+    if (!smtpRecipient) {
+      showToast('Please enter an alert recipient email first', false);
+      return;
+    }
+    setSmtpTesting(true);
+    try {
+      const res = await fetch('/api/settings/test-email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recipient: smtpRecipient })
+      });
+      const data = await res.json();
+      if (res.ok && data.status === 'success') {
+        showToast(data.message || 'Test email sent to ' + smtpRecipient);
+      } else {
+        showToast(data.message || 'Failed to send test email', false);
+      }
+    } catch (err) {
+      showToast('Network error while sending email', false);
+    } finally {
+      setSmtpTesting(false);
+    }
+  };
+
+  const clearHistory = () => {
+    setConfirmMessage("Are you sure you want to permanently clear all violation history from the system database? This cannot be undone.");
+    setConfirmCallback(() => async () => {
+      try {
+        const r = await fetch('/api/violations/clear', { method: 'POST' });
+        if (r.ok) showToast('All violation history cleared');
+        else showToast('Error clearing history', false);
+      } catch { showToast('Network error', false); }
+    });
+    setShowConfirmModal(true);
+  };
+
+  const updateCamera = (id, field, val) => {
+    const newCams = cameras.map(c => c.id === id ? { ...c, [field]: val } : c);
+    setCameras(newCams);
+    localStorage.setItem('cameras', JSON.stringify(newCams));
+  };
 
   const confColor = confThresh >= 80 ? 'var(--green)' : confThresh >= 65 ? 'var(--amber)' : 'var(--red)';
   const isDark = theme === 'dark';
@@ -355,7 +624,7 @@ const Settings = () => {
 
                   <div className="section-hdr mt-4"><i className="fa-solid fa-shield-halved me-2"></i>Security</div>
                   <SRow icon="fa-mobile-screen" iconBg="rgba(59,130,246,0.1)" iconColor="var(--blue)" label="Two-Factor Authentication" desc="Require a verification code in addition to your password on login">
-                    <Toggle checked={twoFA} onChange={setTwoFA} />
+                    <Toggle checked={twoFA} onChange={handleTwoFAChange} />
                   </SRow>
                   <SRow icon="fa-right-from-bracket" iconBg="rgba(245,158,11,0.1)" iconColor="var(--amber)" label="Auto Logout" desc="Automatically end your session after a period of inactivity">
                     <Toggle checked={autoLogout} onChange={setAutoLogout} />
@@ -382,24 +651,28 @@ const Settings = () => {
                       <div className="activity-dot" style={{ background: 'var(--green)' }}></div>
                       <div className="activity-body">
                         <div className="activity-title">Session started</div>
-                        <div className="activity-sub">This device · just now</div>
+                        <div className="activity-sub">This device · {new Date(parseInt(localStorage.getItem('loginTime') || Date.now())).toLocaleString()}</div>
                       </div>
                       <span className="tag g">Current</span>
                     </div>
-                    <div className="activity-item">
-                      <div className="activity-dot" style={{ background: 'var(--blue)' }}></div>
-                      <div className="activity-body">
-                        <div className="activity-title">Password changed</div>
-                        <div className="activity-sub">This device · 3 days ago</div>
+                    {localStorage.getItem('lastPassChange') && (
+                      <div className="activity-item">
+                        <div className="activity-dot" style={{ background: 'var(--blue)' }}></div>
+                        <div className="activity-body">
+                          <div className="activity-title">Password changed</div>
+                          <div className="activity-sub">This device · {new Date(parseInt(localStorage.getItem('lastPassChange'))).toLocaleString()}</div>
+                        </div>
                       </div>
-                    </div>
-                    <div className="activity-item">
-                      <div className="activity-dot" style={{ background: 'var(--tx3)' }}></div>
-                      <div className="activity-body">
-                        <div className="activity-title">Session ended</div>
-                        <div className="activity-sub">This device · 5 days ago</div>
+                    )}
+                    {localStorage.getItem('lastProfileChange') && (
+                      <div className="activity-item">
+                        <div className="activity-dot" style={{ background: 'var(--tx3)' }}></div>
+                        <div className="activity-body">
+                          <div className="activity-title">Profile updated</div>
+                          <div className="activity-sub">This device · {new Date(parseInt(localStorage.getItem('lastProfileChange'))).toLocaleString()}</div>
+                        </div>
                       </div>
-                    </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -493,6 +766,65 @@ const Settings = () => {
                   <SRow icon="fa-volume-high" iconBg="rgba(245,158,11,0.1)" iconColor="var(--amber)" label="Sound Alarms" desc="Play an audio alert when a violation is detected">
                     <Toggle checked={soundAlerts} onChange={setSoundAlerts} />
                   </SRow>
+
+                  {soundAlerts && (
+                    <div className="mt-3 mb-2 ps-5" style={{ animation: 'fadeIn 0.25s ease-out' }}>
+                      <div className="flabel mb-2" style={{ fontWeight: 600, fontSize: '13px', color: 'var(--tx2)' }}>Alarm Tone Profile</div>
+                      <div className="d-flex flex-column gap-2">
+                        {ALARM_TONES.map(t => (
+                          <div 
+                            key={t.id} 
+                            style={{ 
+                              display: 'flex', 
+                              justifyContent: 'space-between', 
+                              alignItems: 'center', 
+                              background: alarmTone === t.id ? 'rgba(245,158,11,0.06)' : 'rgba(0,0,0,0.15)', 
+                              padding: '10px 14px', 
+                              borderRadius: '12px', 
+                              border: `1px solid ${alarmTone === t.id ? 'var(--amber)' : 'var(--border)'}`,
+                              transition: 'var(--tr)'
+                            }}
+                          >
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }} onClick={() => setAlarmTone(t.id)}>
+                              <input 
+                                type="radio" 
+                                name="alarmTone" 
+                                checked={alarmTone === t.id} 
+                                onChange={() => setAlarmTone(t.id)} 
+                                style={{ accentColor: 'var(--amber)', cursor: 'pointer' }} 
+                              />
+                              <div>
+                                <div style={{ fontSize: '13.5px', fontWeight: 600, color: 'var(--tx1)' }}>{t.name}</div>
+                                <div style={{ fontSize: '11px', color: 'var(--tx3)', marginTop: '2px' }}>{t.desc}</div>
+                              </div>
+                            </div>
+                            <button 
+                              className="btn-icon" 
+                              onClick={() => playTestTone(t.id)} 
+                              style={{ 
+                                background: 'rgba(255,255,255,0.06)', 
+                                border: '1px solid var(--border)', 
+                                color: 'var(--tx2)',
+                                borderRadius: '50%', 
+                                width: '30px', 
+                                height: '30px', 
+                                display: 'flex', 
+                                alignItems: 'center', 
+                                justifyContent: 'center', 
+                                cursor: 'pointer',
+                                transition: 'var(--tr)'
+                              }}
+                              onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--amber)'; e.currentTarget.style.color = 'var(--amber)'; }}
+                              onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--tx2)'; }}
+                              title="Test Sound"
+                            >
+                              <i className="fa-solid fa-play" style={{ fontSize: '10px' }}></i>
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   <div className="section-hdr mt-4 mb-3"><i className="fa-solid fa-stopwatch me-2"></i>Alert Cooldown</div>
                   <div className="mb-4">
@@ -647,7 +979,11 @@ const Settings = () => {
                   ))}
                   <button
                     className="btn-ghost btn-sm mt-2"
-                    onClick={() => setCameras(p => [...p, { id: p.length, name: `Camera ${p.length}`, location: 'New Location', enabled: false }])}
+                    onClick={() => {
+                      const newCams = [...cameras, { id: cameras.length, name: `Camera ${cameras.length}`, location: 'New Location', enabled: false }];
+                      setCameras(newCams);
+                      localStorage.setItem('cameras', JSON.stringify(newCams));
+                    }}
                   >
                     <i className="fa-solid fa-plus me-1"></i>Add Camera
                   </button>
@@ -718,14 +1054,17 @@ const Settings = () => {
                       <div className="danger-action-desc">Restore all settings to factory defaults. Your account and violation data will not be affected.</div>
                     </div>
                     <button className="btn-danger-outline" onClick={() => {
-                      if (!window.confirm('Reset all settings to defaults?')) return;
-                      localStorage.removeItem('accentColor');
-                      localStorage.removeItem('theme');
-                      setTheme('dark');
-                      setConfThresh(50);
-                      setThrottle(3);
-                      setAlertCooldown(60);
-                      showToast('Settings reset to defaults');
+                      setConfirmMessage("Are you sure you want to reset all platform configurations to factory defaults? Your user profile and logged violations will not be changed.");
+                      setConfirmCallback(() => () => {
+                        localStorage.removeItem('accentColor');
+                        localStorage.removeItem('theme');
+                        setTheme('dark');
+                        setConfThresh(50);
+                        setThrottle(3);
+                        setAlertCooldown(60);
+                        showToast('Settings reset to defaults');
+                      });
+                      setShowConfirmModal(true);
                     }}>
                       <i className="fa-solid fa-rotate-left me-1"></i>Reset
                     </button>
@@ -756,6 +1095,185 @@ const Settings = () => {
         <i className={`fa-solid ${toast.ok ? 'fa-circle-check' : 'fa-circle-exclamation'}`}></i>
         <span>{toast.msg}</span>
       </div>
+
+      {show2FAModal && (
+        <div style={{
+          position: 'fixed',
+          top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0, 0, 0, 0.65)',
+          backdropFilter: 'blur(10px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 9999,
+          padding: '20px'
+        }}>
+          <div className="c stagger-1" style={{
+            width: '100%',
+            maxWidth: '420px',
+            background: 'var(--card)',
+            border: '1px solid var(--border)',
+            borderRadius: '16px',
+            boxShadow: '0 20px 45px rgba(0,0,0,0.4)',
+            overflow: 'hidden'
+          }}>
+            <div className="c-head" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 20px', borderBottom: '1px solid var(--border)' }}>
+              <div className="c-title" style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '15px' }}>
+                <i className="fa-solid fa-shield-halved" style={{ color: 'var(--blue)' }}></i>Google Authenticator 2FA
+              </div>
+              <button 
+                onClick={() => setShow2FAModal(false)}
+                style={{ background: 'none', border: 'none', color: 'var(--tx3)', cursor: 'pointer', fontSize: '18px' }}
+              >
+                <i className="fa-solid fa-xmark"></i>
+              </button>
+            </div>
+            <div className="c-body" style={{ padding: '20px', textAlign: 'center' }}>
+              <p style={{ fontSize: '13px', color: 'var(--tx2)', marginBottom: '16px', lineHeight: 1.5 }}>
+                Scan this QR code using the Google Authenticator app on your mobile device to link your account.
+              </p>
+              
+              <div style={{
+                background: 'white',
+                padding: '12px',
+                borderRadius: '12px',
+                display: 'inline-block',
+                marginBottom: '16px',
+                boxShadow: '0 4px 12px rgba(0,0,0,0.1)'
+              }}>
+                <img 
+                  src={twoFAQrUrl} 
+                  alt="2FA QR Code" 
+                  style={{ width: '170px', height: '170px', display: 'block' }} 
+                />
+              </div>
+              
+              <div style={{
+                background: 'rgba(59, 130, 246, 0.04)',
+                border: '1px dashed var(--blue)',
+                borderRadius: '8px',
+                padding: '8px 12px',
+                marginBottom: '20px',
+                fontSize: '11px',
+                color: 'var(--tx2)',
+                wordBreak: 'break-all',
+                fontFamily: 'monospace'
+              }}>
+                <span style={{ display: 'block', fontSize: '9px', textTransform: 'uppercase', color: 'var(--blue)', fontWeight: 600, marginBottom: '2px' }}>
+                  Manual Setup Key:
+                </span>
+                {twoFASecret}
+              </div>
+
+              {twoFAError && (
+                <div className="error-msg show mb-3" style={{ textAlign: 'left', display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 12px', borderRadius: '8px', fontSize: '12px' }}>
+                  <i className="fa-solid fa-circle-exclamation"></i>
+                  <span>{twoFAError}</span>
+                </div>
+              )}
+
+              <form onSubmit={verify2FA}>
+                <div className="fgroup mb-3" style={{ textAlign: 'left' }}>
+                  <label className="flabel" style={{ fontSize: '11px' }}>6-Digit Verification Code</label>
+                  <div className="input-icon-wrap">
+                    <i className="fa-solid fa-key"></i>
+                    <input 
+                      type="text" 
+                      className="finput" 
+                      maxLength="6"
+                      placeholder="e.g. 123456"
+                      value={twoFACode}
+                      onChange={e => setTwoFACode(e.target.value.replace(/\D/g, ''))}
+                      style={{ letterSpacing: '4px', textAlign: 'center', fontWeight: 700, fontSize: '16px' }}
+                      required
+                    />
+                  </div>
+                </div>
+
+                <div style={{ display: 'flex', gap: '10px' }}>
+                  <button 
+                    type="button" 
+                    className="btn-w btn-flex w-100" 
+                    onClick={() => setShow2FAModal(false)}
+                    style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', cursor: 'pointer', height: '40px', borderRadius: '8px' }}
+                  >
+                    Cancel
+                  </button>
+                  <button 
+                    type="submit" 
+                    className="btn-r btn-flex w-100"
+                    disabled={verifying2FA}
+                    style={{ background: 'var(--blue)', borderColor: 'var(--blue)', color: 'white', cursor: 'pointer', height: '40px', borderRadius: '8px' }}
+                  >
+                    {verifying2FA ? (
+                      <><i className="fa-solid fa-spinner fa-spin me-2"></i>Verifying...</>
+                    ) : (
+                      <><i className="fa-solid fa-circle-check me-2"></i>Verify & Enable</>
+                    )}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showConfirmModal && (
+        <div style={{
+          position: 'fixed',
+          top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0, 0, 0, 0.65)',
+          backdropFilter: 'blur(10px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 9999,
+          padding: '20px'
+        }}>
+          <div className="c stagger-1" style={{
+            width: '100%',
+            maxWidth: '400px',
+            background: 'var(--card)',
+            border: '1px solid var(--border)',
+            borderRadius: '16px',
+            boxShadow: '0 20px 45px rgba(0,0,0,0.4)',
+            overflow: 'hidden'
+          }}>
+            <div className="c-head" style={{ padding: '16px 20px', borderBottom: '1px solid var(--border)' }}>
+              <div className="c-title" style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '15px' }}>
+                <i className="fa-solid fa-triangle-exclamation" style={{ color: 'var(--red)' }}></i>Confirm Action
+              </div>
+            </div>
+            <div className="c-body" style={{ padding: '20px', textAlign: 'center' }}>
+              <p style={{ fontSize: '13.5px', color: 'var(--tx1)', marginBottom: '24px', lineHeight: 1.5 }}>
+                {confirmMessage}
+              </p>
+              
+              <div style={{ display: 'flex', gap: '10px' }}>
+                <button 
+                  type="button" 
+                  className="btn-w btn-flex w-100" 
+                  onClick={() => setShowConfirmModal(false)}
+                  style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', cursor: 'pointer', height: '40px', borderRadius: '8px', fontWeight: 600 }}
+                >
+                  Cancel
+                </button>
+                <button 
+                  type="button" 
+                  className="btn-r btn-flex w-100"
+                  onClick={() => {
+                    if (confirmCallback) confirmCallback();
+                    setShowConfirmModal(false);
+                  }}
+                  style={{ background: 'var(--red)', borderColor: 'var(--red)', color: 'white', cursor: 'pointer', height: '40px', borderRadius: '8px', fontWeight: 600 }}
+                >
+                  Confirm
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

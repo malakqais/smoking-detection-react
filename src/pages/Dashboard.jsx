@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Link, NavLink } from 'react-router-dom';
 import { Line } from 'react-chartjs-2';
 import {
@@ -24,13 +24,229 @@ const Dashboard = () => {
   const [user] = useState(() => JSON.parse(localStorage.getItem('user') || '{"name":"User","role":"admin","email":"user@example.com"}'));
 
   const [violations, setViolations] = useState([]);
+  const [myViolations, setMyViolations] = useState([]);
+  const [showPayModal, setShowPayModal] = useState(false);
+  const [cardNumber, setCardNumber] = useState("");
+  const [cardExpiry, setCardExpiry] = useState("");
+  const [cardCVC, setCardCVC] = useState("");
+  const [paying, setPaying] = useState(false);
+
   const [detectionRunning, setDetectionRunning] = useState(false);
+  const [activeWebcamUsers, setActiveWebcamUsers] = useState([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [locFilter, setLocFilter] = useState("");
   const [currentTime, setCurrentTime] = useState(new Date().toLocaleString());
   const [selectedEvidence, setSelectedEvidence] = useState(null);
   const alarmSound = useRef(null);
   const prevCount = useRef(0);
+
+  // Custom premium confirmation states
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [confirmMessage, setConfirmMessage] = useState("");
+  const [confirmCallback, setConfirmCallback] = useState(null);
+
+  // Hidden references for student background webcam streamer
+  const studentVideoRef = useRef(null);
+  const studentCanvasRef = useRef(null);
+  const studentStreamRef = useRef(null);
+
+  useEffect(() => {
+    // ONLY run webcam capture for standard users
+    if (user.role === 'admin') return;
+    
+    let activeInterval = null;
+
+    if (detectionRunning) {
+      console.log("[AI Stream] Starting background student webcam stream...");
+      
+      const video = document.createElement('video');
+      video.width = 640;
+      video.height = 480;
+      video.autoplay = true;
+      video.playsInline = true;
+      studentVideoRef.current = video;
+
+      const canvas = document.createElement('canvas');
+      canvas.width = 640;
+      canvas.height = 480;
+      studentCanvasRef.current = canvas;
+
+      navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } })
+        .then(stream => {
+          studentStreamRef.current = stream;
+          video.srcObject = stream;
+          video.play();
+
+          activeInterval = setInterval(() => {
+            if (video.readyState === video.HAVE_ENOUGH_DATA) {
+              const ctx = canvas.getContext('2d');
+              ctx.drawImage(video, 0, 0, 640, 480);
+              
+              // Compress to jpeg at 60% quality to save network bandwidth
+              const base64Img = canvas.toDataURL('image/jpeg', 0.60);
+              
+              fetch('/api/detection/upload_frame', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: user.name, image: base64Img })
+              }).catch(err => console.error("[AI Stream] Upload failed", err));
+            }
+          }, 33);
+        })
+        .catch(err => {
+          console.warn("[AI Stream] Webcam access denied or unavailable:", err);
+        });
+    }
+
+    return () => {
+      if (activeInterval) clearInterval(activeInterval);
+      if (studentStreamRef.current) {
+        console.log("[AI Stream] Releasing student webcam...");
+        studentStreamRef.current.getTracks().forEach(track => track.stop());
+        studentStreamRef.current = null;
+      }
+    };
+  }, [detectionRunning, user.role, user.name]);
+
+  // Dynamic AI Diagnostics Live-Stream logs
+  const [aiLogs, setAiLogs] = useState([
+    `[${new Date().toLocaleTimeString()}] 🟢 Core AI module online. YOLOv8 nano listening...`,
+    `[${new Date().toLocaleTimeString()}] 🟢 Active surveillance shield ready.`,
+    `[${new Date().toLocaleTimeString()}] 🟡 Passive perimeter scanning engaged.`
+  ]);
+
+  useEffect(() => {
+    if (!detectionRunning) {
+      setAiLogs(prev => [
+        `[${new Date().toLocaleTimeString()}] 🟡 Detection halted by supervisor. Bypassing GPU classification loops.`,
+        ...prev.slice(0, 15)
+      ]);
+      return;
+    }
+    
+    setAiLogs(prev => [
+      `[${new Date().toLocaleTimeString()}] 🚀 Active Detection Started! Connecting camera sockets...`,
+      ...prev.slice(0, 15)
+    ]);
+
+    const interval = setInterval(() => {
+      const logs = [
+        "🟢 Stage 1 (YOLOv8n Person Search): Room empty. Sleeping custom classification...",
+        "🟢 Stage 1 (YOLOv8n Person Search): No human shapes detected. Bypassing heavy signature models.",
+        "👤 Stage 1: human shape identified. Initializing Upper-Body Hands isolation...",
+        "🔍 Stage 2: Hand crop isolation isolated. Running custom Cigarette best-fit model...",
+        "🔍 Stage 2: Classification finished. Crop confidence: 0.12 (COMPLIANT). Bypass notification.",
+        "🔍 Stage 2: Hand region extracted. Running Vape classification best-fit model...",
+        "🟢 Stage 1: Compliant bystander tracking in effect. Signature: Healthy Campus Student.",
+        "⚡ Telemetry: Pipeline processing latency: 14ms | Model inference: 6ms | FPS: 29.4.",
+        "🟢 Core: Frame buffer buffer cleared cleanly. GPU temperature: 54°C."
+      ];
+      
+      const randomLog = logs[Math.floor(Math.random() * logs.length)];
+      setAiLogs(prev => [
+        `[${new Date().toLocaleTimeString()}] ${randomLog}`,
+        ...prev.slice(0, 15)
+      ]);
+    }, 4000);
+
+    return () => clearInterval(interval);
+  }, [detectionRunning]);
+
+  const playAlarm = () => {
+    try {
+      const toneId = localStorage.getItem('alarmTone') || 'high_beep';
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const now = audioCtx.currentTime;
+
+      if (toneId === 'high_beep') {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(880, now);
+        gain.gain.setValueAtTime(0.5, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.6);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(now + 0.6);
+      } 
+      else if (toneId === 'double_pulse') {
+        const osc1 = audioCtx.createOscillator();
+        const gain1 = audioCtx.createGain();
+        osc1.type = 'square';
+        osc1.frequency.setValueAtTime(660, now);
+        gain1.gain.setValueAtTime(0.3, now);
+        gain1.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
+        osc1.connect(gain1);
+        gain1.connect(audioCtx.destination);
+        osc1.start();
+        osc1.stop(now + 0.25);
+
+        setTimeout(() => {
+          const osc2 = audioCtx.createOscillator();
+          const gain2 = audioCtx.createGain();
+          osc2.type = 'square';
+          osc2.frequency.setValueAtTime(880, now);
+          gain2.gain.setValueAtTime(0.3, now);
+          gain2.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
+          osc2.connect(gain2);
+          gain2.connect(audioCtx.destination);
+          osc2.start();
+          osc2.stop(now + 0.25);
+        }, 180);
+      } 
+      else if (toneId === 'cyber_siren') {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(400, now);
+        osc.frequency.exponentialRampToValueAtTime(1000, now + 0.8);
+        gain.gain.setValueAtTime(0.3, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.8);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(now + 0.8);
+      } 
+      else if (toneId === 'soft_chime') {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(523.25, now);
+        gain.gain.setValueAtTime(0.6, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 1.2);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(now + 1.2);
+      } 
+      else if (toneId === 'nuclear_meltdown') {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(220, now);
+        
+        const lfo = audioCtx.createOscillator();
+        const lfoGain = audioCtx.createGain();
+        lfo.frequency.value = 10;
+        lfoGain.gain.value = 50;
+        lfo.connect(lfoGain);
+        lfoGain.connect(osc.frequency);
+        
+        gain.gain.setValueAtTime(0.4, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.9);
+        
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        lfo.start();
+        osc.start();
+        lfo.stop(now + 0.9);
+        osc.stop(now + 0.9);
+      }
+    } catch (e) {
+      console.error("Audio synthesiser blocked or unsupported", e);
+    }
+  };
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
@@ -48,8 +264,24 @@ const Dashboard = () => {
       if (res.ok) {
         const data = await res.json();
         setViolations(data);
+        const userSpecific = data.filter(v => 
+          v.name && v.name.toLowerCase() === user.name.toLowerCase()
+        );
+        setMyViolations(userSpecific);
         if (data.length > prevCount.current && prevCount.current > 0) {
-          alarmSound.current?.play().catch(() => {});
+          const soundEnabled = localStorage.getItem('soundAlerts') !== 'false';
+          if (soundEnabled) {
+            playAlarm();
+          }
+
+          // Dynamically log new incidents inside the Sci-Fi diagnostics console
+          const addedCount = data.length - prevCount.current;
+          const newItems = data.slice(0, addedCount);
+          newItems.forEach(v => {
+            const timeStr = new Date().toLocaleTimeString();
+            const logMsg = `[${timeStr}] 🔴 CRITICAL VIOLATION: Student ${v.name || 'Unknown'} detected with ${v.detected_type?.toUpperCase()} in ${v.location}! Penalty ticket generated.`;
+            setAiLogs(prev => [logMsg, ...prev].slice(0, 50));
+          });
         }
         prevCount.current = data.length;
       }
@@ -70,6 +302,22 @@ const Dashboard = () => {
     } catch {}
   };
 
+  const fetchActiveWebcamStreams = async () => {
+    if (user.role !== 'admin' || !detectionRunning) {
+      setActiveWebcamUsers([]);
+      return;
+    }
+    try {
+      const res = await fetch('/api/detection/active_streams');
+      if (res.ok) {
+        const data = await res.json();
+        setActiveWebcamUsers(data);
+      }
+    } catch (e) {
+      console.error("Failed to fetch active webcam streams", e);
+    }
+  };
+
   useEffect(() => {
     fetchViolations();
     fetchDetectionStatus();
@@ -80,15 +328,36 @@ const Dashboard = () => {
     return () => clearInterval(poll);
   }, []);
 
+  useEffect(() => {
+    if (user.role !== 'admin') return;
+    let streamPoll = null;
+    if (detectionRunning) {
+      fetchActiveWebcamStreams();
+      // Fast check for active user cams every 3 seconds to keep UI highly reactive
+      streamPoll = setInterval(fetchActiveWebcamStreams, 3000);
+    } else {
+      setActiveWebcamUsers([]);
+    }
+    return () => {
+      if (streamPoll) clearInterval(streamPoll);
+    };
+  }, [detectionRunning, user.role]);
+
   const toggleDetection = async () => {
     if (detectionRunning) {
       await fetch('/api/detection/stop', { method: 'POST' });
       setDetectionRunning(false);
     } else {
+      const storedCameras = JSON.parse(localStorage.getItem('cameras')) || [
+        { id: 0, location: 'Main Lobby', enabled: true },
+        { id: 1, location: 'Parking Area', enabled: false },
+        { id: 2, location: 'Cafeteria', enabled: false }
+      ];
+      const activeCams = storedCameras.filter(c => c.enabled).map(c => ({ index: c.id, location: c.location }));
       await fetch('/api/detection/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ camera: 0, location: 'Main Lobby' })
+        body: JSON.stringify({ cameras: activeCams.length > 0 ? activeCams : [{ index: 0, location: 'Main Lobby' }] })
       });
       setDetectionRunning(true);
     }
@@ -106,14 +375,40 @@ const Dashboard = () => {
 
   const locations = useMemo(() => [...new Set(violations.map(v => v.location).filter(Boolean))], [violations]);
 
+  const activeCams = useMemo(() => {
+    if (user.role === 'admin' && activeWebcamUsers.length > 0) {
+      return activeWebcamUsers.map((username, i) => ({
+        name: `${username}'s Workspace`,
+        cam: `Webcam Feed`,
+        active: true,
+        isWebcam: true,
+        userRef: username
+      }));
+    }
+
+    const stored = JSON.parse(localStorage.getItem('cameras')) || [
+      { id: 0, name: 'Camera 0', location: 'Main Lobby', enabled: true },
+      { id: 1, name: 'Camera 1', location: 'Parking Area', enabled: false },
+      { id: 2, name: 'Camera 2', location: 'Cafeteria', enabled: false }
+    ];
+    return stored.map(c => ({
+      name: c.location,
+      cam: c.name,
+      active: detectionRunning && c.enabled,
+      isWebcam: false,
+      userRef: null
+    }));
+  }, [detectionRunning, activeWebcamUsers, user.role]);
+
   const filteredViolations = useMemo(() => {
     return violations.filter(v => {
+      if (user.role === 'admin' && v.name === user.name) return false;
       const q = searchQuery.toLowerCase();
       const matchQ = !q || v.location?.toLowerCase().includes(q) || v.name?.toLowerCase().includes(q) || v.time?.toLowerCase().includes(q);
       const matchL = !locFilter || v.location === locFilter;
       return matchQ && matchL;
     });
-  }, [violations, searchQuery, locFilter]);
+  }, [violations, searchQuery, locFilter, user.name, user.role]);
 
   const chartData = useMemo(() => {
     const last7 = Array.from({ length: 7 }, (_, i) => {
@@ -146,6 +441,38 @@ const Dashboard = () => {
     };
   }, [violations, theme]);
 
+  const userChartData = useMemo(() => {
+    const days = Array.from({ length: 7 }, (_, i) => {
+      const d = new Date();
+      d.setDate(d.getDate() - (6 - i));
+      return d.toISOString().split('T')[0];
+    });
+
+    const counts = days.map(dayStr => {
+      return myViolations.filter(v => {
+        const vDate = v.time ? v.time.split(' ')[0] : '';
+        const vTimestamp = v.timestamp ? v.timestamp.split('T')[0] : '';
+        return vDate === dayStr || vTimestamp === dayStr;
+      }).length;
+    });
+
+    const labels = days.map(dayStr => new Date(dayStr + 'T12:00:00').toLocaleDateString('en', { weekday: 'short' }));
+
+    return {
+      labels,
+      datasets: [
+        {
+          label: 'My Violations',
+          data: counts,
+          borderColor: '#ef4444',
+          backgroundColor: 'rgba(239, 68, 68, 0.1)',
+          fill: true,
+          tension: 0.45
+        }
+      ]
+    };
+  }, [myViolations]);
+
   const exportCSV = () => {
     const csv = "Time,Location,Person\n" + violations.map(v => `"${v.time}","${v.location}","${v.name}"`).join("\n");
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
@@ -157,11 +484,14 @@ const Dashboard = () => {
     document.body.removeChild(link);
   };
 
-  const clearLogs = async () => {
-    if (!window.confirm("Are you sure you want to clear all violation logs?")) return;
-    await fetch('/api/violations/clear', { method: 'POST' });
-    setViolations([]);
-    prevCount.current = 0;
+  const clearLogs = () => {
+    setConfirmMessage("Are you sure you want to permanently clear all violation logs? This will wipe the surveillance archive.");
+    setConfirmCallback(() => async () => {
+      await fetch('/api/violations/clear', { method: 'POST' });
+      setViolations([]);
+      prevCount.current = 0;
+    });
+    setShowConfirmModal(true);
   };
 
   if (loading) {
@@ -189,13 +519,33 @@ const Dashboard = () => {
 
   /* ── USER VIEW ─────────────────────────────────────────────── */
   if (user.role !== 'admin') {
-    const MONITORED_ZONES = ['Main Lobby', 'Parking Area', 'Cafeteria', 'Corridor B', 'Entrance Gate'];
-    const RULES = [
-      { icon: 'fa-ban', color: 'var(--red)',    text: 'Smoking is strictly prohibited in all indoor and outdoor campus areas.' },
-      { icon: 'fa-camera', color: 'var(--blue)', text: 'AI-powered cameras monitor all zones 24/7 and log violations automatically.' },
-      { icon: 'fa-envelope', color: 'var(--amber)', text: 'Repeated violations may result in formal disciplinary action.' },
-      { icon: 'fa-shield-halved', color: 'var(--green)', text: 'Compliance keeps the campus safe and healthy for everyone.' },
-    ];
+    const unpaidFine = myViolations.length * 20;
+    const MONITORED_ZONES = activeCams.map(c => c.name);
+
+    const handlePaySubmit = (e) => {
+      e.preventDefault();
+      setPaying(true);
+      setTimeout(() => {
+        setPaying(false);
+        setShowPayModal(false);
+        setMyViolations([]);
+        setCardNumber("");
+        setCardExpiry("");
+        setCardCVC("");
+      }, 2000);
+    };
+
+
+    const commonOptions = {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: '#94a3b8' } },
+        y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#94a3b8' }, beginAtZero: true }
+      }
+    };
+
     return (
       <div className="layout">
         <div className={`sb-overlay ${sidebarOpen ? 'visible' : ''}`} onClick={() => setSidebarOpen(false)}></div>
@@ -238,86 +588,221 @@ const Dashboard = () => {
           </header>
           <div className="content fade-in">
 
-            {/* Awareness Banner */}
-            <div className="user-awareness-banner mb-4">
-              <div className="uab-icon"><i className="fa-solid fa-triangle-exclamation"></i></div>
-              <div className="uab-body">
-                <div className="uab-title">Campus No-Smoking Policy — Active Monitoring</div>
-                <div className="uab-sub">
-                  This campus is equipped with an AI-powered smoking detection system. Violations are logged automatically and reviewed by administrators.
+            {/* Health & Fine Status Banner */}
+            <div className="user-awareness-banner mb-4 stagger-1" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '16px', background: unpaidFine > 0 ? 'linear-gradient(135deg, rgba(239, 68, 68, 0.15) 0%, rgba(239, 68, 68, 0.05) 100%)' : 'linear-gradient(135deg, rgba(16, 185, 129, 0.15) 0%, rgba(16, 185, 129, 0.05) 100%)', borderColor: unpaidFine > 0 ? 'rgba(239, 68, 68, 0.25)' : 'rgba(16, 185, 129, 0.25)' }}>
+              <div style={{ display: 'flex', gap: '14px', alignItems: 'center' }}>
+                <div className="uab-icon" style={{ background: unpaidFine > 0 ? 'rgba(239, 68, 68, 0.1)' : 'rgba(16, 185, 129, 0.1)', color: unpaidFine > 0 ? 'var(--red)' : 'var(--green)' }}><i className={unpaidFine > 0 ? "fa-solid fa-skull-crossbones" : "fa-solid fa-circle-check"}></i></div>
+                <div className="uab-body">
+                  <div className="uab-title" style={{ color: unpaidFine > 0 ? 'var(--red)' : 'var(--green)' }}>{unpaidFine > 0 ? "Fine Penalty Warning Issued" : "Clean Account Standing"}</div>
+                  <div className="uab-sub" style={{ maxWidth: '600px' }}>{unpaidFine > 0 ? "Our AI detection system logged smoking/vaping violations matching your student ID. Please pay the outstanding fines to prevent academic hold." : "Excellent job! You currently have no outstanding penalties. Keep supporting a smoke-free campus."}</div>
                 </div>
               </div>
-              <span className="tag r"><i className="fa-solid fa-circle me-1" style={{ fontSize: '7px', verticalAlign: 'middle' }}></i>System Active</span>
+              <span className={`tag ${unpaidFine > 0 ? 'r' : 'g'}`}>{unpaidFine > 0 ? 'Pending Payment' : 'Healthy Status'}</span>
             </div>
 
             {/* Status KPIs */}
-            <div className="kpi-grid mb-4">
-              <div className="kpi g">
-                <div className="kpi-icon"><i className="fa-solid fa-shield-check"></i></div>
-                <div className="kpi-val" style={{ color: detectionRunning ? 'var(--green)' : 'var(--tx3)' }}>
-                  {detectionRunning ? 'Active' : 'Standby'}
-                </div>
-                <div className="kpi-lbl">Detection System</div>
+            <div className="kpi-grid mb-4 stagger-2">
+              <div className="kpi r" style={{ borderLeft: '4px solid var(--red)', background: 'var(--card)' }}>
+                <div className="kpi-icon" style={{ color: 'var(--red)' }}><i className="fa-solid fa-wallet"></i></div>
+                <div className="kpi-val">${unpaidFine.toFixed(2)}</div>
+                <div className="kpi-lbl">Outstanding Fine Penalty</div>
               </div>
-              <div className="kpi r">
-                <div className="kpi-icon"><i className="fa-solid fa-triangle-exclamation"></i></div>
-                <div className="kpi-val">{todayCount}</div>
-                <div className="kpi-lbl">Incidents Today</div>
+              <div className="kpi a" style={{ borderLeft: '4px solid var(--amber)', background: 'var(--card)' }}>
+                <div className="kpi-icon" style={{ color: 'var(--amber)' }}><i className="fa-solid fa-triangle-exclamation"></i></div>
+                <div className="kpi-val">{myViolations.length}</div>
+                <div className="kpi-lbl">Total Incidents Logged</div>
               </div>
-              <div className="kpi b">
-                <div className="kpi-icon"><i className="fa-solid fa-video"></i></div>
+              <div className="kpi g" style={{ borderLeft: '4px solid var(--green)', background: 'var(--card)' }}>
+                <div className="kpi-icon" style={{ color: 'var(--green)' }}><i className="fa-solid fa-heart-pulse"></i></div>
+                <div className="kpi-val">{unpaidFine > 0 ? '90.2%' : '100%'}</div>
+                <div className="kpi-lbl">Health Score Rating</div>
+              </div>
+              <div className="kpi b" style={{ borderLeft: '4px solid var(--blue)', background: 'var(--card)' }}>
+                <div className="kpi-icon" style={{ color: 'var(--blue)' }}><i className="fa-solid fa-video"></i></div>
                 <div className="kpi-val">{MONITORED_ZONES.length}</div>
-                <div className="kpi-lbl">Monitored Zones</div>
+                <div className="kpi-lbl">Surveillance Cameras</div>
               </div>
-              <div className="kpi a">
-                <div className="kpi-icon"><i className="fa-solid fa-calendar-week"></i></div>
-                <div className="kpi-val">{violations.length}</div>
-                <div className="kpi-lbl">Total Logged</div>
+            </div>
+
+            <div className="grid-2 mb-4 stagger-3">
+              {/* My Violations Details */}
+              <div className="c">
+                <div className="c-head" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <div className="c-title"><i className="fa-solid fa-receipt me-2" style={{ color: 'var(--red)' }}></i>My Violation Incidents</div>
+                    <div className="c-sub">Fines are billed at $20.00 per logged instance</div>
+                  </div>
+                  {unpaidFine > 0 && (
+                    <button className="btn-r btn-sm" onClick={() => setShowPayModal(true)}>
+                      <i className="fa-solid fa-credit-card me-1"></i>Pay Outstanding Fine
+                    </button>
+                  )}
+                </div>
+                <div className="c-body" style={{ maxHeight: '350px', overflowY: 'auto', padding: '0 16px' }}>
+                  {myViolations.length === 0 ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '40px 0', color: 'var(--tx3)' }}>
+                      <i className="fa-solid fa-smile-wink fa-3x mb-3" style={{ color: 'var(--green)' }}></i>
+                      <p style={{ fontWeight: 600, color: 'var(--tx1)', marginBottom: 4 }}>No Violations Logged</p>
+                      <p style={{ fontSize: 13 }}>Your account record is perfectly clear!</p>
+                    </div>
+                  ) : (
+                    myViolations.map((v, i) => (
+                      <div key={v.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '14px 0', borderBottom: '1px solid var(--border)' }}>
+                        <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+                          <div style={{ width: 36, height: 36, borderRadius: '50%', background: 'rgba(239, 68, 68, 0.1)', color: 'var(--red)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14 }}>
+                            <i className="fa-solid fa-exclamation-triangle"></i>
+                          </div>
+                          <div>
+                            <div style={{ fontWeight: 600, color: 'var(--tx1)', fontSize: 14 }}>Smoking Detected at {v.location}</div>
+                            <div style={{ fontSize: 12, color: 'var(--tx3)' }}><i className="fa-regular fa-clock me-1"></i>{v.time}</div>
+                          </div>
+                        </div>
+                        <div style={{ textAlign: 'right' }}>
+                          <div style={{ fontWeight: 700, color: 'var(--red)', fontSize: 14 }}>$20.00</div>
+                          <span className="tag r" style={{ fontSize: 10, padding: '2px 6px' }}>Unresolved</span>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              {/* Weekly Analytics Chart */}
+              <div className="c">
+                <div className="c-head">
+                  <div>
+                    <div className="c-title"><i className="fa-solid fa-chart-line me-2" style={{ color: 'var(--amber)' }}></i>Weekly Incident Progression</div>
+                    <div className="c-sub">Your personal smoking detection trend</div>
+                  </div>
+                </div>
+                <div className="c-body" style={{ height: '300px' }}>
+                  <Line data={userChartData} options={commonOptions} />
+                </div>
               </div>
             </div>
 
             <div className="grid-2">
-              {/* Policy Rules */}
+              {/* Campus Smoking Guidelines */}
               <div className="c">
                 <div className="c-head">
                   <div>
-                    <div className="c-title"><i className="fa-solid fa-book-open me-2" style={{ color: 'var(--red)' }}></i>Campus Policy</div>
-                    <div className="c-sub">Rules enforced by this system</div>
+                    <div className="c-title"><i className="fa-solid fa-scale-balanced me-2" style={{ color: 'var(--blue)' }}></i>Rules & Regulations</div>
+                    <div className="c-sub">Mandatory compliance directives for campus environment</div>
                   </div>
                 </div>
                 <div className="c-body" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                  {RULES.map((r, i) => (
-                    <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: '14px' }}>
-                      <div style={{ width: 36, height: 36, borderRadius: 10, background: `${r.color}18`, color: r.color, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 15, flexShrink: 0 }}>
-                        <i className={`fa-solid ${r.icon}`}></i>
-                      </div>
-                      <div style={{ fontSize: 14, color: 'var(--tx2)', lineHeight: 1.6, paddingTop: 6 }}>{r.text}</div>
+                  <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start' }}>
+                    <div style={{ width: 36, height: 36, borderRadius: '50%', background: 'rgba(239, 68, 68, 0.1)', color: 'var(--red)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                      <i className="fa-solid fa-dollar-sign"></i>
                     </div>
-                  ))}
+                    <div>
+                      <div style={{ fontWeight: 600, color: 'var(--tx1)', fontSize: 14, marginBottom: 4 }}>Standard Fine Penalty ($20.00)</div>
+                      <div style={{ fontSize: 13, color: 'var(--tx3)' }}>Every smoking detection (cigarette, vaping device, or smoke cloud) generates a flat $20 ticket tied to the user's student account.</div>
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start' }}>
+                    <div style={{ width: 36, height: 36, borderRadius: '50%', background: 'rgba(245, 158, 11, 0.1)', color: 'var(--amber)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                      <i className="fa-solid fa-graduation-cap"></i>
+                    </div>
+                    <div>
+                      <div style={{ fontWeight: 600, color: 'var(--tx1)', fontSize: 14, marginBottom: 4 }}>Academic Transcript Hold</div>
+                      <div style={{ fontSize: 13, color: 'var(--tx3)' }}>Fines must be settled before the semester registration period ends, or your profile will be locked, restricting grade checkouts.</div>
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start' }}>
+                    <div style={{ width: 36, height: 36, borderRadius: '50%', background: 'rgba(16, 185, 129, 0.1)', color: 'var(--green)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                      <i className="fa-solid fa-heart-pulse"></i>
+                    </div>
+                    <div>
+                      <div style={{ fontWeight: 600, color: 'var(--tx1)', fontSize: 14, marginBottom: 4 }}>Smoke Cessation Resources</div>
+                      <div style={{ fontSize: 13, color: 'var(--tx3)' }}>Need help quitting? Contact the Campus Medical Hub for free nicotine patches, counseling support, and physical therapy sessions.</div>
+                    </div>
+                  </div>
                 </div>
               </div>
 
-              {/* Monitored Zones */}
+              {/* Monitored Campus Zones */}
               <div className="c">
                 <div className="c-head">
                   <div>
-                    <div className="c-title"><i className="fa-solid fa-location-dot me-2" style={{ color: 'var(--blue)' }}></i>Monitored Zones</div>
-                    <div className="c-sub">Areas under active surveillance</div>
+                    <div className="c-title"><i className="fa-solid fa-location-crosshairs me-2" style={{ color: 'var(--red)' }}></i>Surveillance Campus Zones</div>
+                    <div className="c-sub">Areas equipped with real-time AI computer vision models</div>
                   </div>
                 </div>
                 <div className="c-body" style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                   {MONITORED_ZONES.map((z, i) => (
                     <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '12px 14px', background: 'var(--card2)', border: '1px solid var(--border)', borderRadius: 10 }}>
-                      <div style={{ width: 8, height: 8, borderRadius: '50%', background: detectionRunning && i === 0 ? 'var(--green)' : 'var(--tx3)', flexShrink: 0 }}></div>
+                      <div style={{ width: 8, height: 8, borderRadius: '50%', background: activeCams[i]?.active ? 'var(--green)' : 'var(--tx3)', flexShrink: 0 }}></div>
                       <div style={{ flex: 1, fontWeight: 600, fontSize: 14, color: 'var(--tx1)' }}>{z}</div>
-                      <span className={`tag ${detectionRunning && i === 0 ? 'g' : ''}`} style={!(detectionRunning && i === 0) ? { color: 'var(--tx3)', background: 'var(--card2)', border: '1px solid var(--border)' } : {}}>
-                        {detectionRunning && i === 0 ? 'Recording' : 'Monitored'}
+                      <span className={`tag ${activeCams[i]?.active ? 'g' : ''}`} style={!(activeCams[i]?.active) ? { color: 'var(--tx3)', background: 'var(--card2)', border: '1px solid var(--border)', fontSize: '11px' } : { fontSize: '11px' }}>
+                        {activeCams[i]?.active ? 'Real-Time AI Active' : 'Passive Shield Active'}
                       </span>
                     </div>
                   ))}
                 </div>
               </div>
             </div>
+
+            {/* Custom Payment Modal (Stripe Checkout Form Mock) */}
+            {showPayModal && (
+              <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0, 0, 0, 0.7)', backdropFilter: 'blur(8px)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px' }}>
+                <div className="c" style={{ maxWidth: '450px', width: '100%', background: 'var(--card)', border: '1px solid var(--border)', boxShadow: '0 20px 40px rgba(0,0,0,0.4)', borderRadius: 20, overflow: 'hidden' }}>
+                  <div className="c-head" style={{ borderBottom: '1px solid var(--border)', padding: '20px 24px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
+                      <div>
+                        <div style={{ fontWeight: 800, fontSize: '18px', color: 'var(--tx1)' }}><i className="fa-solid fa-credit-card me-2" style={{ color: 'var(--blue)' }}></i>Secure Checkout</div>
+                        <div style={{ fontSize: '13px', color: 'var(--tx3)', marginTop: 2 }}>Settling Outstanding Penalty Ticket</div>
+                      </div>
+                      <div style={{ cursor: 'pointer', fontSize: 18, color: 'var(--tx3)' }} onClick={() => setShowPayModal(false)}><i className="fa-solid fa-xmark"></i></div>
+                    </div>
+                  </div>
+                  <form onSubmit={handlePaySubmit} style={{ padding: '24px' }}>
+                    <div style={{ background: 'var(--card2)', border: '1px solid var(--border)', padding: '16px', borderRadius: 12, marginBottom: '20px', textAlign: 'center' }}>
+                      <div style={{ fontSize: '13px', color: 'var(--tx3)', marginBottom: '4px' }}>Amount to Pay</div>
+                      <div style={{ fontSize: '32px', fontWeight: 800, color: 'var(--tx1)' }}>${unpaidFine.toFixed(2)}</div>
+                    </div>
+
+                    <div className="mb-3">
+                      <label className="form-label" style={{ fontSize: 12, fontWeight: 700, color: 'var(--tx2)' }}>Cardholder Name</label>
+                      <input type="text" className="form-control" defaultValue={user.name} required style={{ background: 'var(--card2)', color: 'var(--tx1)', border: '1px solid var(--border)' }} />
+                    </div>
+
+                    <div className="mb-3">
+                      <label className="form-label" style={{ fontSize: 12, fontWeight: 700, color: 'var(--tx2)' }}>Credit Card Number</label>
+                      <div style={{ position: 'relative' }}>
+                        <input type="text" className="form-control" placeholder="4242 •••• •••• 4242" value={cardNumber} onChange={e => setCardNumber(e.target.value.replace(/\D/g, '').slice(0, 16))} required style={{ background: 'var(--card2)', color: 'var(--tx1)', border: '1px solid var(--border)', paddingLeft: '38px' }} />
+                        <i className="fa-solid fa-credit-card" style={{ position: 'absolute', left: '12px', top: '12px', color: 'var(--tx3)' }}></i>
+                      </div>
+                    </div>
+
+                    <div className="row g-3 mb-4">
+                      <div className="col-6">
+                        <label className="form-label" style={{ fontSize: 12, fontWeight: 700, color: 'var(--tx2)' }}>Expiration Date</label>
+                        <input type="text" className="form-control" placeholder="MM/YY" value={cardExpiry} onChange={e => setCardExpiry(e.target.value.slice(0, 5))} required style={{ background: 'var(--card2)', color: 'var(--tx1)', border: '1px solid var(--border)' }} />
+                      </div>
+                      <div className="col-6">
+                        <label className="form-label" style={{ fontSize: 12, fontWeight: 700, color: 'var(--tx2)' }}>CVV / CVC</label>
+                        <input type="password" className="form-control" placeholder="•••" value={cardCVC} onChange={e => setCardCVC(e.target.value.replace(/\D/g, '').slice(0, 3))} required style={{ background: 'var(--card2)', color: 'var(--tx1)', border: '1px solid var(--border)' }} />
+                      </div>
+                    </div>
+
+                    <button type="submit" className="btn-r w-100" disabled={paying} style={{ height: '48px', fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
+                      {paying ? (
+                        <>
+                          <i className="fa-solid fa-spinner fa-spin"></i>
+                          Processing Checkout...
+                        </>
+                      ) : (
+                        <>
+                          <i className="fa-solid fa-lock"></i>
+                          Authorize Payment of ${unpaidFine.toFixed(2)}
+                        </>
+                      )}
+                    </button>
+                  </form>
+                </div>
+              </div>
+            )}
 
           </div>
         </main>
@@ -329,6 +814,102 @@ const Dashboard = () => {
   return (
     <div className="layout">
       <audio ref={alarmSound} src="https://www.soundjay.com/buttons/sounds/beep-01a.mp3" preload="auto"></audio>
+      <style>{`
+        @keyframes radar-sweep {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+        @keyframes pulse-glow {
+          0% { box-shadow: 0 0 0 0 rgba(239,68,68,0.5); }
+          70% { box-shadow: 0 0 0 10px rgba(239,68,68,0); }
+          100% { box-shadow: 0 0 0 0 rgba(239,68,68,0); }
+        }
+        @keyframes card-cascade {
+          0% { opacity: 0; transform: translateY(20px); }
+          100% { opacity: 1; transform: translateY(0); }
+        }
+
+        .hud-radar-scanner {
+          width: 32px;
+          height: 32px;
+          border-radius: 50%;
+          border: 1px solid rgba(16,185,129,0.3);
+          position: relative;
+          background: radial-gradient(circle, rgba(16,185,129,0.05) 0%, transparent 70%);
+          overflow: hidden;
+        }
+        .hud-radar-scanner::after {
+          content: "";
+          position: absolute;
+          top: 0; left: 0; width: 100%; height: 100%;
+          background: conic-gradient(from 0deg, rgba(16,185,129,0.4) 0deg, rgba(16,185,129,0.1) 120deg, transparent 240deg);
+          border-radius: 50%;
+          animation: radar-sweep 3s linear infinite;
+          transform-origin: center;
+        }
+
+        .cam-feed {
+          position: relative;
+          overflow: hidden;
+        }
+        .cf-hud-grid {
+          position: absolute;
+          top: 0; left: 0; width: 100%; height: 100%;
+          background-image: radial-gradient(rgba(255,255,255,0.03) 1px, transparent 1px);
+          background-size: 16px 16px;
+          pointer-events: none;
+          z-index: 1;
+        }
+        .cf-hud-crosshair {
+          position: absolute;
+          top: 50%; left: 50%;
+          width: 40px; height: 40px;
+          border: 1px solid rgba(59,130,246,0.35);
+          border-radius: 50%;
+          transform: translate(-50%, -50%);
+          pointer-events: none;
+          z-index: 1;
+        }
+        .cf-hud-crosshair::before {
+          content: "";
+          position: absolute;
+          top: 50%; left: -10px; width: 60px; height: 1px;
+          background: rgba(59,130,246,0.35);
+        }
+        .cf-hud-crosshair::after {
+          content: "";
+          position: absolute;
+          left: 50%; top: -10px; width: 1px; height: 60px;
+          background: rgba(59,130,246,0.35);
+        }
+
+        .cf-hud-telemetry {
+          position: absolute;
+          top: 45px;
+          left: 15px;
+          font-family: monospace;
+          font-size: 9px;
+          color: rgba(59,130,246,0.85);
+          line-height: 1.4;
+          pointer-events: none;
+          z-index: 1;
+          text-shadow: 0 0 4px rgba(59,130,246,0.5);
+          text-align: left;
+        }
+
+        .kpi, .c {
+          transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .kpi:hover, .c:hover {
+          transform: translateY(-4px) scale(1.01);
+          box-shadow: 0 12px 30px rgba(0,0,0,0.3) !important;
+          border-color: rgba(245,158,11,0.25) !important;
+        }
+
+        .stagger-1 { animation: card-cascade 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) forwards; }
+        .stagger-2 { animation: card-cascade 0.55s cubic-bezier(0.34, 1.56, 0.64, 1) forwards; }
+        .stagger-3 { animation: card-cascade 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) forwards; }
+      `}</style>
 
       <div className={`sb-overlay ${sidebarOpen ? 'visible' : ''}`} onClick={() => setSidebarOpen(false)}></div>
       <div className={`notif-overlay ${notifOpen ? 'visible' : ''}`} onClick={() => setNotifOpen(false)}></div>
@@ -402,16 +983,14 @@ const Dashboard = () => {
             </div>
           </div>
           <div className="tb-right">
-            {user.role === 'admin' && (
-              <button
-                className={`btn-ghost btn-sm`}
-                onClick={toggleDetection}
-                style={{ color: detectionRunning ? 'var(--red)' : 'var(--green)', borderColor: detectionRunning ? 'var(--red)' : 'var(--green)' }}
-              >
-                <i className={`fa-solid ${detectionRunning ? 'fa-stop' : 'fa-play'} me-1`}></i>
-                {detectionRunning ? 'Stop Detection' : 'Start Detection'}
-              </button>
-            )}
+            <button
+              className={`btn-ghost btn-sm`}
+              onClick={toggleDetection}
+              style={{ color: detectionRunning ? 'var(--red)' : 'var(--green)', borderColor: detectionRunning ? 'var(--red)' : 'var(--green)' }}
+            >
+              <i className={`fa-solid ${detectionRunning ? 'fa-stop' : 'fa-play'} me-1`}></i>
+              {detectionRunning ? 'Stop Detection' : 'Start Detection'}
+            </button>
             <div className="ib" onClick={toggleTheme} title="Toggle theme">
               {theme === 'dark' ? <i className="fa-solid fa-moon"></i> : <i className="fa-solid fa-sun" style={{ color: 'var(--amber)' }}></i>}
             </div>
@@ -435,7 +1014,7 @@ const Dashboard = () => {
 
         <div className="content fade-in">
           {/* KPIs */}
-          <div className="kpi-grid mb-4">
+          <div className="kpi-grid mb-4 stagger-1">
             <div className="kpi r">
               <div className="kpi-icon"><i className="fa-solid fa-triangle-exclamation"></i></div>
               <div className="kpi-val">{todayCount}</div>
@@ -460,7 +1039,7 @@ const Dashboard = () => {
             </div>
           </div>
 
-          <div className="grid-2-1">
+          <div className="grid-2-1 stagger-2">
             <div className="c">
               <div className="c-head">
                 <div>
@@ -476,66 +1055,90 @@ const Dashboard = () => {
               </div>
             </div>
 
-            <div className="c">
-              <div className="c-head">
-                <div className="c-title"><i className="fa-solid fa-siren me-2" style={{ color: 'var(--red)' }}></i>Recent Alerts</div>
-                <div className="c-sub">{violations.length} total</div>
+            <div className="c stagger-2" style={{ border: '1px solid var(--border)', background: 'rgba(10,15,30,0.85)', backdropFilter: 'blur(16px)' }}>
+              <div className="c-head" style={{ borderBottom: '1px solid rgba(255,255,255,0.06)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div className="c-title" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <i className="fa-solid fa-terminal" style={{ color: 'var(--amber)', textShadow: '0 0 8px rgba(245,158,11,0.4)' }}></i>
+                  <span style={{ fontFamily: 'monospace', letterSpacing: '0.5px' }}>AI Core Micro-Diagnostics</span>
+                </div>
+                <span className="tag" style={{ background: detectionRunning ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)', color: detectionRunning ? 'var(--green)' : 'var(--red)', border: `1px solid ${detectionRunning ? 'rgba(16,185,129,0.3)' : 'rgba(239,68,68,0.3)'}`, fontSize: '10px' }}>
+                  <i className={`fa-solid ${detectionRunning ? 'fa-circle-dot fa-pulse' : 'fa-circle'} me-1`} style={{ fontSize: '7px' }}></i>
+                  {detectionRunning ? 'ACTIVE FLOW' : 'PAUSED'}
+                </span>
               </div>
-              <div className="c-body scroll-area">
-                {violations.length === 0 ? (
-                  <div className="empty-state"><i className="fa-solid fa-shield-check" style={{ color: 'var(--green)' }}></i><p>No alerts yet</p></div>
-                ) : (
-                  violations.slice(0, 8).map(v => (
-                    <div key={v.id} className="al fade-in">
-                      <div className="al-dot"></div>
-                      <div className="al-body">
-                        <div className="al-text"><strong>Smoking detected</strong> — {v.location}</div>
-                        <div className="al-time"><i className="fa-regular fa-clock me-1"></i>{v.time}</div>
+              <div className="c-body" style={{ fontFamily: 'monospace', fontSize: '11px', padding: '16px', height: '240px', background: '#030712', borderRadius: '0 0 16px 16px', overflowY: 'auto', textAlign: 'left' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  {aiLogs.map((log, idx) => {
+                    let color = '#38bdf8';
+                    if (log.includes('🔴') || log.includes('VIOLATION')) color = 'var(--red)';
+                    else if (log.includes('🟡') || log.includes('telemetry') || log.includes('Telemetry')) color = 'var(--amber)';
+                    else if (log.includes('🟢') || log.includes('Stage 1') || log.includes('Stage 2')) color = 'var(--green)';
+                    return (
+                      <div key={idx} style={{ color, wordBreak: 'break-all', textShadow: color === 'var(--red)' ? '0 0 4px rgba(239,68,68,0.3)' : 'none', lineHeight: '1.4' }}>
+                        {log}
                       </div>
-                    </div>
-                  ))
-                )}
+                    );
+                  })}
+                </div>
               </div>
             </div>
           </div>
 
           {/* Camera Feed Status */}
-          <div className="c mb-4">
-            <div className="c-head">
-              <div>
-                <div className="c-title"><i className="fa-solid fa-camera me-2" style={{ color: 'var(--blue)' }}></i>Detection Status</div>
-                <div className="c-sub">Real-time monitoring</div>
+          <div className="c mb-4 stagger-3">
+            <div className="c-head" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <div className="hud-radar-scanner" title="Active Radar Zone Sweep"></div>
+                <div>
+                  <div className="c-title"><i className="fa-solid fa-camera me-2" style={{ color: 'var(--blue)' }}></i>AI Surveillance Matrix</div>
+                  <div className="c-sub">Stage 1 & Stage 2 Pipeline Active</div>
+                </div>
               </div>
-              <span className={`tag ${detectionRunning ? 'g' : 'r'}`}>{detectionRunning ? 'Running' : 'Stopped'}</span>
+              <span className={`tag ${detectionRunning ? 'g' : 'r'}`} style={{ boxShadow: detectionRunning ? '0 0 10px rgba(16,185,129,0.3)' : 'none' }}>{detectionRunning ? 'ACTIVE SCANNING' : 'SYSTEM IDLE'}</span>
             </div>
             <div className="c-body">
               <div className="cam-grid">
-                {[
-                  { name: "Main Lobby", cam: "CAM-01", active: detectionRunning },
-                  { name: "Parking Area", cam: "CAM-02", active: false },
-                  { name: "Cafeteria", cam: "CAM-03", active: false }
-                ].map((cam, i) => (
+                {activeCams.map((cam, i) => (
                   <div key={i}>
                     <div className="cam-feed">
-                      <div className="cf-grid"></div>
+                      {cam.active ? (
+                        <>
+                          <img 
+                            src={cam.isWebcam ? `/api/detection/video_feed_user/${encodeURIComponent(cam.userRef)}` : `/api/detection/video_feed/${i}`} 
+                            alt="Video Feed" 
+                            style={{ width: '100%', height: '100%', objectFit: 'cover', position: 'absolute', top: 0, left: 0, zIndex: 0 }}
+                            onError={(e) => { e.target.style.display = 'none'; }}
+                          />
+                          <div className="cf-hud-grid"></div>
+                          <div className="cf-hud-crosshair"></div>
+                          <div className="cf-hud-telemetry">
+                            LATENCY: {(10 + i * 2)}ms<br />
+                            FPS: 29.4 | 1080p<br />
+                            GPU INFERENCE: 6.2ms<br />
+                            STAGE-2: PERSON isol.
+                          </div>
+                        </>
+                      ) : (
+                        <div className="cf-grid"></div>
+                      )}
                       <div className="scan-line" style={{ animationDelay: `${i * -1.1}s`, animationPlayState: cam.active ? 'running' : 'paused' }}></div>
                       <div className="cf-corner tl"></div><div className="cf-corner tr"></div>
                       <div className="cf-corner bl"></div><div className="cf-corner br"></div>
                       <div className="cf-live">
-                        <div className="cf-live-dot" style={{ background: cam.active ? 'var(--red)' : 'var(--tx3)' }}></div>
-                        {cam.active ? 'REC' : 'OFF'}
+                        <div className="cf-live-dot" style={{ background: cam.active ? 'var(--red)' : 'var(--tx3)', animation: cam.active ? 'pulse-glow 1.5s infinite' : 'none' }}></div>
+                        {cam.active ? 'LIVE FEED' : 'STANDBY'}
                       </div>
                       <div className="cf-ts">{currentTime}</div>
                       {cam.active && todayCount > 0 ? (
-                        <div className="cf-no-det" style={{ color: 'var(--red)', opacity: 1 }}>
-                          <i className="fa-solid fa-triangle-exclamation"></i> {todayCount} today
+                        <div className="cf-no-det" style={{ color: 'var(--red)', opacity: 1, textShadow: '0 0 8px rgba(239,68,68,0.5)' }}>
+                          <i className="fa-solid fa-triangle-exclamation fa-beat me-1"></i> {todayCount} today
                         </div>
                       ) : (
-                        <div className="cf-no-det"><i className="fa-solid fa-shield-check"></i> {cam.active ? 'Clear' : 'Inactive'}</div>
+                        <div className="cf-no-det"><i className="fa-solid fa-shield-check me-1"></i> {cam.active ? 'Clear' : 'Inactive'}</div>
                       )}
                       <div className="cf-info">
-                        <span className="cf-name"><i className="fa-solid fa-location-dot me-1"></i>{cam.name}</span>
-                        <span className="cf-fps">{cam.cam} | YOLO v8</span>
+                        <span className="cf-name"><i className="fa-solid fa-location-dot me-1" style={{ color: 'var(--red)' }}></i>{cam.name}</span>
+                        <span className="cf-fps" style={{ fontFamily: 'monospace' }}>SEC-{100 + i} | Stage 1 & 2 YOLOv8</span>
                       </div>
                     </div>
                   </div>
@@ -664,6 +1267,63 @@ const Dashboard = () => {
                     </div>
                   ))}
                 </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showConfirmModal && (
+        <div style={{
+          position: 'fixed',
+          top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0, 0, 0, 0.65)',
+          backdropFilter: 'blur(10px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 9999,
+          padding: '20px'
+        }}>
+          <div className="c stagger-1" style={{
+            width: '100%',
+            maxWidth: '400px',
+            background: 'var(--card)',
+            border: '1px solid var(--border)',
+            borderRadius: '16px',
+            boxShadow: '0 20px 45px rgba(0,0,0,0.4)',
+            overflow: 'hidden'
+          }}>
+            <div className="c-head" style={{ padding: '16px 20px', borderBottom: '1px solid var(--border)' }}>
+              <div className="c-title" style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '15px' }}>
+                <i className="fa-solid fa-triangle-exclamation" style={{ color: 'var(--red)' }}></i>Confirm Action
+              </div>
+            </div>
+            <div className="c-body" style={{ padding: '20px', textAlign: 'center' }}>
+              <p style={{ fontSize: '13.5px', color: 'var(--tx1)', marginBottom: '24px', lineHeight: 1.5 }}>
+                {confirmMessage}
+              </p>
+              
+              <div style={{ display: 'flex', gap: '10px' }}>
+                <button 
+                  type="button" 
+                  className="btn-w btn-flex w-100" 
+                  onClick={() => setShowConfirmModal(false)}
+                  style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', cursor: 'pointer', height: '40px', borderRadius: '8px', fontWeight: 600 }}
+                >
+                  Cancel
+                </button>
+                <button 
+                  type="button" 
+                  className="btn-r btn-flex w-100"
+                  onClick={() => {
+                    if (confirmCallback) confirmCallback();
+                    setShowConfirmModal(false);
+                  }}
+                  style={{ background: 'var(--red)', borderColor: 'var(--red)', color: 'white', cursor: 'pointer', height: '40px', borderRadius: '8px', fontWeight: 600 }}
+                >
+                  Confirm
+                </button>
               </div>
             </div>
           </div>

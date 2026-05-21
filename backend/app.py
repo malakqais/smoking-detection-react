@@ -1,8 +1,16 @@
-﻿from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory
 import sqlite3
 import os
 import datetime
+import hmac
+import hashlib
+import time
+import base64
+import secrets
+import urllib.parse
+from werkzeug.security import generate_password_hash, check_password_hash
 from database import init_db
+from email_service import send_test_email
 import detection as det
 
 app = Flask(__name__)
@@ -24,6 +32,12 @@ def _ensure_users_table():
         conn.execute("ALTER TABLE users ADD COLUMN created_at TEXT")
         conn.execute("UPDATE users SET created_at = datetime('now') WHERE created_at IS NULL")
         conn.commit()
+    if 'two_factor_secret' not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN two_factor_secret TEXT")
+        conn.commit()
+    if 'two_factor_enabled' not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN two_factor_enabled INTEGER DEFAULT 0")
+        conn.commit()
     conn.close()
 
 
@@ -41,6 +55,30 @@ def _ensure_admin():
 
 _ensure_users_table()
 _ensure_admin()
+
+
+def verify_totp_token(secret, code_str):
+    try:
+        # Check current, past, and next time steps for 30s clock drift tolerance
+        for offset_step in (-1, 0, 1):
+            missing_padding = len(secret) % 8
+            padded_secret = secret + ('=' * (8 - missing_padding) if missing_padding else '')
+            key = base64.b32decode(padded_secret, casefold=True)
+            counter = int(time.time() / 30) + offset_step
+            msg = counter.to_bytes(8, byteorder='big')
+            hs = hmac.new(key, msg, hashlib.sha1).digest()
+            offset = hs[-1] & 0x0F
+            val = ((hs[offset] & 0x7f) << 24 |
+                   (hs[offset+1] & 0xff) << 16 |
+                   (hs[offset+2] & 0xff) << 8 |
+                   (hs[offset+3] & 0xff))
+            calc_code = str(val % 1000000).zfill(6)
+            if calc_code == code_str:
+                return True
+        return False
+    except Exception as e:
+        print(f"[2FA] Error verifying token: {e}")
+        return False
 
 
 @app.after_request
@@ -62,10 +100,11 @@ def signup():
     data = request.json
     email = data.get('email', '')
     role = 'admin' if email.endswith(ADMIN_DOMAIN) else 'user'
+    hashed_pass = generate_password_hash(data['password'])
     try:
         conn = sqlite3.connect('violations.db')
         conn.execute("INSERT INTO users (name, email, password, role, created_at) VALUES (?, ?, ?, ?, datetime('now'))",
-                     (data['name'], email, data['password'], role))
+                     (data['name'], email, hashed_pass, role))
         conn.commit()
         conn.close()
         return jsonify({"status": "success", "message": "Account created", "role": role}), 201
@@ -80,13 +119,153 @@ def login():
     data = request.json
     conn = sqlite3.connect('violations.db')
     user = conn.execute(
-        "SELECT name, email, role FROM users WHERE email = ? AND password = ?",
-        (data['email'], data['password'])
+        "SELECT name, email, role, created_at, password, two_factor_enabled, two_factor_secret FROM users WHERE email = ?",
+        (data['email'],)
     ).fetchone()
     conn.close()
     if user:
-        return jsonify({"status": "success", "user": {"name": user[0], "email": user[1], "role": user[2]}})
+        name, email, role, created_at, stored_pass, two_fa_enabled, two_fa_secret = user
+        if stored_pass == data['password'] or check_password_hash(stored_pass, data['password']):
+            # Auto-migrate password to hashed if it was plaintext
+            if stored_pass == data['password']:
+                conn = sqlite3.connect('violations.db')
+                conn.execute("UPDATE users SET password = ? WHERE email = ?", (generate_password_hash(data['password']), email))
+                conn.commit()
+                conn.close()
+
+            if two_fa_enabled == 1:
+                return jsonify({
+                    "status": "2fa_required",
+                    "email": email,
+                    "user": {"name": name, "email": email, "role": role, "created_at": created_at, "two_factor_enabled": 1}
+                })
+            else:
+                return jsonify({
+                    "status": "success",
+                    "user": {"name": name, "email": email, "role": role, "created_at": created_at, "two_factor_enabled": 0}
+                })
     return jsonify({"status": "error", "message": "Invalid credentials"}), 401
+
+
+@app.route('/api/settings/test-email', methods=['POST'])
+def test_email_endpoint():
+    data = request.json or {}
+    recipient = data.get('recipient')
+    if not recipient:
+        return jsonify({"status": "error", "message": "Recipient required"}), 400
+    
+    success = send_test_email(recipient)
+    if success:
+        return jsonify({"status": "success", "message": f"Test email sent to {recipient}"})
+    else:
+        return jsonify({"status": "error", "message": "Failed to send email. Check SMTP configuration."}), 500
+
+@app.route('/login/2fa', methods=['POST'])
+def login_2fa():
+    data = request.json or {}
+    email = data.get('email')
+    code = data.get('code')
+    
+    conn = sqlite3.connect('violations.db')
+    user = conn.execute("SELECT name, email, role, created_at, two_factor_secret FROM users WHERE email = ? AND two_factor_enabled = 1", (email,)).fetchone()
+    conn.close()
+    
+    if not user:
+        return jsonify({"status": "error", "message": "2FA setup not found"}), 404
+        
+    name, email, role, created_at, secret = user
+    if verify_totp_token(secret, code):
+        return jsonify({
+            "status": "success",
+            "user": {"name": name, "email": email, "role": role, "created_at": created_at, "two_factor_enabled": 1}
+        })
+    else:
+        return jsonify({"status": "error", "message": "Invalid verification code. Please check Authenticator."}), 400
+
+
+@app.route('/api/2fa/setup', methods=['POST'])
+def setup_2fa():
+    import qrcode
+    import io
+    import base64
+
+    data = request.json or {}
+    email = data.get('email')
+    
+    # Generate a random 16-char Base32 secret for Google Authenticator
+    secret = "".join(secrets.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567") for _ in range(16))
+    
+    label = f"SmokeDet:{email}"
+    issuer = "SmokeDet"
+    otpauth_url = f"otpauth://totp/{urllib.parse.quote(label)}?secret={secret}&issuer={urllib.parse.quote(issuer)}"
+    
+    # Generate actual local QR code PNG image as base64 string
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=10,
+        border=4,
+    )
+    qr.add_data(otpauth_url)
+    qr.make(fit=True)
+    
+    img = qr.make_image(fill_color="black", back_color="white")
+    buffered = io.BytesIO()
+    img.save(buffered, format="PNG")
+    img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+    qr_code_url = f"data:image/png;base64,{img_str}"
+    
+    return jsonify({
+        "status": "success",
+        "secret": secret,
+        "qr_code_url": qr_code_url
+    })
+
+
+@app.route('/api/2fa/verify', methods=['POST'])
+def verify_2fa():
+    data = request.json or {}
+    email = data.get('email')
+    code = data.get('code')
+    secret = data.get('secret')
+    
+    if not code or not secret:
+        return jsonify({"status": "error", "message": "Missing credentials"}), 400
+        
+    if verify_totp_token(secret, code):
+        conn = sqlite3.connect('violations.db')
+        conn.execute("UPDATE users SET two_factor_enabled = 1, two_factor_secret = ? WHERE email = ?", (secret, email))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "success", "message": "Two-factor authentication successfully configured!"})
+    else:
+        return jsonify({"status": "error", "message": "Invalid code. Please try again."}), 400
+
+
+@app.route('/api/2fa/disable', methods=['POST'])
+def disable_2fa():
+    data = request.json or {}
+    email = data.get('email')
+    
+    conn = sqlite3.connect('violations.db')
+    conn.execute("UPDATE users SET two_factor_enabled = 0, two_factor_secret = NULL WHERE email = ?", (email,))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "success", "message": "Two-factor authentication disabled."})
+
+
+@app.route('/api/users/update', methods=['POST'])
+def update_user():
+    data = request.json
+    conn = sqlite3.connect('violations.db')
+    if data.get('password'):
+        hashed = generate_password_hash(data['password'])
+        conn.execute("UPDATE users SET name = ?, password = ? WHERE email = ?", (data['name'], hashed, data['email']))
+    else:
+        conn.execute("UPDATE users SET name = ? WHERE email = ?", (data['name'], data['email']))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "success"})
 
 
 # ── users ─────────────────────────────────────────────────────────────────────
@@ -299,9 +478,8 @@ def api_clear():
 @app.route('/api/detection/start', methods=['POST'])
 def api_det_start():
     data = request.json or {}
-    camera = data.get('camera', 0)
-    location = data.get('location', 'Camera 1')
-    started = det.start_detection(camera, location)
+    cameras = data.get('cameras', [{'index': 0, 'location': 'Main Lobby'}])
+    started = det.start_detection(cameras)
     return jsonify({'status': 'started' if started else 'already_running'})
 
 
@@ -314,6 +492,106 @@ def api_det_stop():
 @app.route('/api/detection/status', methods=['GET'])
 def api_det_status():
     return jsonify({'running': det.is_running()})
+
+
+@app.route('/api/detection/video_feed/<int:camera_id>')
+def video_feed(camera_id):
+    def gen():
+        import time
+        import cv2
+        import numpy as np
+        while True:
+            time.sleep(0.04)  # stream at ~25 FPS
+            frame = det.get_latest_frame(camera_id)
+            if frame is not None:
+                ret, jpeg = cv2.imencode('.jpg', frame)
+                if ret:
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n\r\n')
+            else:
+                # yield dark placeholder
+                img = np.zeros((480, 640, 3), np.uint8)
+                cv2.putText(img, "OFFLINE", (240, 250), cv2.FONT_HERSHEY_SIMPLEX, 1, (100, 100, 100), 2)
+                ret, jpeg = cv2.imencode('.jpg', img)
+                if ret:
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n\r\n')
+    from flask import Response
+    return Response(gen(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+# ── multi-client webcam streaming ───────────────────────────────────────────
+
+import base64
+import numpy as np
+import cv2
+
+_user_raw_frames = {}
+_user_annotated_frames = {}
+_user_latest_time = {}
+
+@app.route('/api/detection/upload_frame', methods=['POST'])
+def upload_frame():
+    data = request.json or {}
+    username = data.get('username', 'Unknown')
+    image_data = data.get('image', '')
+    
+    if not image_data:
+        return jsonify({"status": "error", "message": "No image data"}), 400
+
+    try:
+        header, encoded = image_data.split(",", 1) if "," in image_data else ("", image_data)
+        img_bytes = base64.b64decode(encoded)
+        nparr = np.frombuffer(img_bytes, np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if frame is None or frame.size == 0:
+            return jsonify({"status": "error", "message": "Decode failed"}), 400
+
+        # Process the incoming client frame with our custom guardrails
+        annotated_frame, detected = det.process_user_frame(frame, username, f"{username}'s Screen Cam")
+        
+        # Save streams in active registry
+        _user_raw_frames[username] = frame
+        _user_annotated_frames[username] = annotated_frame
+        _user_latest_time[username] = datetime.datetime.now()
+
+        return jsonify({"status": "success", "detected": detected})
+    except Exception as e:
+        print(f"[Upload] Error processing frame from {username}: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route('/api/detection/active_streams', methods=['GET'])
+def active_streams():
+    now = datetime.datetime.now()
+    active = []
+    for name, t in list(_user_latest_time.items()):
+        if (now - t).total_seconds() < 10.0:  # Active if frame received in last 10s
+            active.append(name)
+    return jsonify(active)
+
+
+@app.route('/api/detection/video_feed_user/<username>')
+def video_feed_user(username):
+    def gen():
+        import time
+        while True:
+            time.sleep(0.033)  # stream at ~30 FPS
+            frame = _user_annotated_frames.get(username, None)
+            if frame is not None:
+                ret, jpeg = cv2.imencode('.jpg', frame)
+                if ret:
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n\r\n')
+            else:
+                img = np.zeros((480, 640, 3), np.uint8)
+                cv2.putText(img, "WAITING FOR FEED...", (140, 250), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2)
+                ret, jpeg = cv2.imencode('.jpg', img)
+                if ret:
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n\r\n')
+    from flask import Response
+    return Response(gen(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 
 # ── static image serving ──────────────────────────────────────────────────────

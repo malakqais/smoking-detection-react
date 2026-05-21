@@ -28,6 +28,11 @@ const Profile = () => {
   const [sysStats, setSysStats] = useState(null);
   const [detectionRunning, setDetectionRunning] = useState(false);
 
+  // Custom confirmation modal states
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [confirmMessage, setConfirmMessage] = useState("");
+  const [confirmCallback, setConfirmCallback] = useState(null);
+
   const isAdmin = user.role === 'admin';
 
   useEffect(() => {
@@ -54,11 +59,10 @@ const Profile = () => {
       fetch('/api/violations?limit=500')
         .then(r => r.ok ? r.json() : [])
         .then(data => {
-          // Show tickets where the person name matches this user, or all if name is generic
           const nameMatch = data.filter(v =>
-            v.name && v.name.toLowerCase().includes(user.name.toLowerCase().split(' ')[0])
+            v.name && v.name.toLowerCase() === user.name.toLowerCase()
           );
-          setMyTickets(nameMatch.length > 0 ? nameMatch : data.slice(0, 20));
+          setMyTickets(nameMatch);
         })
         .catch(() => setMyTickets([]))
         .finally(() => setTicketsLoading(false));
@@ -101,28 +105,47 @@ const Profile = () => {
     reader.readAsDataURL(file);
   };
 
-  const saveChanges = () => {
+  const saveChanges = async () => {
     const updated = { ...user, name: fullName };
-    setUser(updated);
-    localStorage.setItem('user', JSON.stringify(updated));
-    const now = Date.now();
-    localStorage.setItem('lastProfileChange', now);
-    setLastProfileChange(now);
-    showToast('Profile saved successfully');
+    try {
+      const res = await fetch('/api/users/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: user.email, name: fullName })
+      });
+      if (res.ok) {
+          setUser(updated);
+          localStorage.setItem('user', JSON.stringify(updated));
+          const now = Date.now();
+          localStorage.setItem('lastProfileChange', now);
+          setLastProfileChange(now);
+          showToast('Profile saved successfully');
+      } else {
+          showToast('Failed to save profile', false);
+      }
+    } catch (e) {
+      showToast('Network error', false);
+    }
   };
 
   const clearLocalData = () => {
-    if (!window.confirm('Clear all local data? Credentials are preserved.')) return;
-    const keep = { isLoggedIn: localStorage.getItem('isLoggedIn'), user: localStorage.getItem('user') };
-    localStorage.clear();
-    Object.entries(keep).forEach(([k, v]) => v && localStorage.setItem(k, v));
-    window.location.reload();
+    setConfirmMessage("Are you sure you want to clear all locally cached settings and appearance choices? Your credentials will remain intact.");
+    setConfirmCallback(() => () => {
+      const keep = { isLoggedIn: localStorage.getItem('isLoggedIn'), user: localStorage.getItem('user') };
+      localStorage.clear();
+      Object.entries(keep).forEach(([k, v]) => v && localStorage.setItem(k, v));
+      window.location.reload();
+    });
+    setShowConfirmModal(true);
   };
 
   const deleteAccount = () => {
-    if (!window.confirm('Delete your account permanently? This cannot be undone.')) return;
-    localStorage.clear();
-    navigate('/logout');
+    setConfirmMessage("Are you sure you want to permanently delete your account? This action is absolutely irreversible.");
+    setConfirmCallback(() => () => {
+      localStorage.clear();
+      navigate('/logout');
+    });
+    setShowConfirmModal(true);
   };
 
   const isDark = theme === 'dark';
@@ -467,6 +490,63 @@ const Profile = () => {
         <i className={`fa-solid ${toast.ok ? 'fa-circle-check' : 'fa-circle-exclamation'}`}></i>
         <span>{toast.msg}</span>
       </div>
+
+      {showConfirmModal && (
+        <div style={{
+          position: 'fixed',
+          top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0, 0, 0, 0.65)',
+          backdropFilter: 'blur(10px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 9999,
+          padding: '20px'
+        }}>
+          <div className="c stagger-1" style={{
+            width: '100%',
+            maxWidth: '400px',
+            background: 'var(--card)',
+            border: '1px solid var(--border)',
+            borderRadius: '16px',
+            boxShadow: '0 20px 45px rgba(0,0,0,0.4)',
+            overflow: 'hidden'
+          }}>
+            <div className="c-head" style={{ padding: '16px 20px', borderBottom: '1px solid var(--border)' }}>
+              <div className="c-title" style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '15px' }}>
+                <i className="fa-solid fa-triangle-exclamation" style={{ color: 'var(--red)' }}></i>Confirm Action
+              </div>
+            </div>
+            <div className="c-body" style={{ padding: '20px', textAlign: 'center' }}>
+              <p style={{ fontSize: '13.5px', color: 'var(--tx1)', marginBottom: '24px', lineHeight: 1.5 }}>
+                {confirmMessage}
+              </p>
+              
+              <div style={{ display: 'flex', gap: '10px' }}>
+                <button 
+                  type="button" 
+                  className="btn-w btn-flex w-100" 
+                  onClick={() => setShowConfirmModal(false)}
+                  style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', cursor: 'pointer', height: '40px', borderRadius: '8px', fontWeight: 600 }}
+                >
+                  Cancel
+                </button>
+                <button 
+                  type="button" 
+                  className="btn-r btn-flex w-100"
+                  onClick={() => {
+                    if (confirmCallback) confirmCallback();
+                    setShowConfirmModal(false);
+                  }}
+                  style={{ background: 'var(--red)', borderColor: 'var(--red)', color: 'white', cursor: 'pointer', height: '40px', borderRadius: '8px', fontWeight: 600 }}
+                >
+                  Confirm
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

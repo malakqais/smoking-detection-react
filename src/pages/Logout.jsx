@@ -9,8 +9,8 @@ const Logout = () => {
 
   useEffect(() => {
     localStorage.removeItem("isLoggedIn");
-    // Also remove user data for security
     localStorage.removeItem("user");
+    localStorage.removeItem("loginTime");
   }, []);
 
   useEffect(() => {

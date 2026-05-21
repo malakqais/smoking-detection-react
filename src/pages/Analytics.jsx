@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Link, NavLink } from 'react-router-dom';
 import { Line, Doughnut, Bar } from 'react-chartjs-2';
 import {
@@ -26,6 +26,7 @@ const Analytics = () => {
   const [notifOpen, setNotifOpen] = useState(false);
   const [user] = useState(() => JSON.parse(localStorage.getItem('user') || '{"name":"User","role":"admin","email":"user@example.com"}'));
   const [stats, setStats] = useState(null);
+  const [violations, setViolations] = useState([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -37,6 +38,9 @@ const Analytics = () => {
     try {
       const res = await fetch('/api/violations/stats');
       if (res.ok) setStats(await res.json());
+
+      const vRes = await fetch('/api/violations?limit=500');
+      if (vRes.ok) setViolations(await vRes.json());
     } catch (e) {
       console.error('Failed to fetch stats', e);
     } finally {
@@ -46,6 +50,8 @@ const Analytics = () => {
 
   useEffect(() => {
     fetchStats();
+    const poll = setInterval(fetchStats, 5000);
+    return () => clearInterval(poll);
   }, []);
 
   const toggleTheme = () => setTheme(prev => prev === 'dark' ? 'light' : 'dark');
@@ -133,6 +139,78 @@ const Analytics = () => {
   const total = stats?.total || 0;
   const top5 = zoneCounts.slice(0, 5);
 
+  const userViolations = useMemo(() => {
+    return violations.filter(v => 
+      v.name && v.name.toLowerCase().includes(user.name.toLowerCase().split(' ')[0])
+    );
+  }, [violations, user.name]);
+
+  const userTypeData = useMemo(() => {
+    const counts = { cigarette: 0, vape: 0, smoke: 0 };
+    userViolations.forEach(v => {
+      const type = (v.detected_type || 'cigarette').toLowerCase();
+      if (type.includes('vape')) counts.vape++;
+      else if (type.includes('smoke')) counts.smoke++;
+      else counts.cigarette++;
+    });
+    return {
+      labels: ['Cigarette', 'Vaping', 'Smoke Cloud'],
+      datasets: [{
+        data: [counts.cigarette, counts.vape, counts.smoke],
+        backgroundColor: ['#ef4444', '#3b82f6', '#f59e0b'],
+        borderColor: isDark ? '#111827' : '#fff',
+        borderWidth: 3
+      }]
+    };
+  }, [userViolations, isDark]);
+
+  const userLocationData = useMemo(() => {
+    const locMap = {};
+    userViolations.forEach(v => {
+      locMap[v.location] = (locMap[v.location] || 0) + 1;
+    });
+    const labels = Object.keys(locMap);
+    const data = Object.values(locMap);
+    return {
+      labels,
+      datasets: [{
+        label: 'Violations',
+        data,
+        backgroundColor: 'rgba(59, 130, 246, 0.7)',
+        borderRadius: 5
+      }]
+    };
+  }, [userViolations]);
+
+  const userTrendData = useMemo(() => {
+    const days = Array.from({ length: 7 }, (_, i) => {
+      const d = new Date();
+      d.setDate(d.getDate() - (6 - i));
+      return d.toISOString().split('T')[0];
+    });
+
+    const counts = days.map(dayStr => {
+      return userViolations.filter(v => {
+        const vDate = v.time ? v.time.split(' ')[0] : '';
+        const vTimestamp = v.timestamp ? v.timestamp.split('T')[0] : '';
+        return vDate === dayStr || vTimestamp === dayStr;
+      }).length;
+    });
+
+    const labels = days.map(dayStr => new Date(dayStr + 'T12:00:00').toLocaleDateString('en', { weekday: 'short' }));
+
+    return {
+      labels,
+      datasets: [{
+        data: counts,
+        borderColor: '#ef4444',
+        backgroundColor: 'rgba(239,68,68,0.15)',
+        fill: true,
+        tension: 0.4
+      }]
+    };
+  }, [userViolations]);
+
   return (
     <div className="layout">
       <div className={`sb-overlay ${sidebarOpen ? 'visible' : ''}`} onClick={() => setSidebarOpen(false)}></div>
@@ -201,58 +279,134 @@ const Analytics = () => {
               <p style={{ color: 'var(--tx3)' }}>Loading statistics...</p>
             </div>
           ) : !isAdmin ? (
-            /* ── USER READ-ONLY VIEW ── */
+            /* ── USER FULL PERSONAL ANALYTICS ── */
             <>
-              <div className="user-awareness-banner mb-4">
-                <div className="uab-icon"><i className="fa-solid fa-chart-pie"></i></div>
+              <div className="user-awareness-banner mb-4" style={{ background: 'linear-gradient(135deg, rgba(59, 130, 246, 0.15) 0%, rgba(59, 130, 246, 0.05) 100%)', borderColor: 'rgba(59, 130, 246, 0.25)' }}>
+                <div className="uab-icon" style={{ background: 'rgba(59, 130, 246, 0.1)', color: 'var(--blue)' }}><i className="fa-solid fa-heart-pulse"></i></div>
                 <div className="uab-body">
-                  <div className="uab-title">Violation Trend — Read-Only View</div>
-                  <div className="uab-sub">You are viewing a summary of system-wide detection activity. Detailed breakdowns are available to administrators only.</div>
+                  <div className="uab-title" style={{ color: 'var(--blue)' }}>Personal Health & Violation Analytics</div>
+                  <div className="uab-sub">Track your health progress, view violation details, and keep track of student fine tallies.</div>
                 </div>
-                <span className="tag b">View Only</span>
+                <span className="tag b">My Account</span>
               </div>
 
+              {/* Personal KPIs */}
               <div className="kpi-grid mb-4">
-                <div className="kpi r">
-                  <div className="kpi-icon"><i className="fa-solid fa-triangle-exclamation"></i></div>
-                  <div className="kpi-val">{total}</div>
-                  <div className="kpi-lbl">Total Violations</div>
+                <div className="kpi r" style={{ borderLeft: '4px solid var(--red)' }}>
+                  <div className="kpi-icon" style={{ color: 'var(--red)' }}><i className="fa-solid fa-wallet"></i></div>
+                  <div className="kpi-val">${(userViolations.length * 20).toFixed(2)}</div>
+                  <div className="kpi-lbl">My Accumulated Fines</div>
                 </div>
-                <div className="kpi a">
-                  <div className="kpi-icon"><i className="fa-solid fa-chart-line"></i></div>
-                  <div className="kpi-val">{stats?.avg_per_day ?? 0}</div>
-                  <div className="kpi-lbl">Avg / Day</div>
+                <div className="kpi a" style={{ borderLeft: '4px solid var(--amber)' }}>
+                  <div className="kpi-icon" style={{ color: 'var(--amber)' }}><i className="fa-solid fa-skull"></i></div>
+                  <div className="kpi-val">{userViolations.length}</div>
+                  <div className="kpi-lbl">Logged Detections</div>
                 </div>
-                <div className="kpi g">
-                  <div className="kpi-icon"><i className="fa-solid fa-shield-check"></i></div>
-                  <div className="kpi-val">92%</div>
-                  <div className="kpi-lbl">Detection Accuracy</div>
+                <div className="kpi g" style={{ borderLeft: '4px solid var(--green)' }}>
+                  <div className="kpi-icon" style={{ color: 'var(--green)' }}><i className="fa-solid fa-award"></i></div>
+                  <div className="kpi-val">{userViolations.length > 3 ? 'Needs Action' : userViolations.length > 0 ? 'Warning Standing' : 'Perfect Gold Card'}</div>
+                  <div className="kpi-lbl">My Wellness Status</div>
                 </div>
-                <div className="kpi b">
-                  <div className="kpi-icon"><i className="fa-solid fa-video"></i></div>
-                  <div className="kpi-val">5</div>
-                  <div className="kpi-lbl">Active Cameras</div>
+                <div className="kpi b" style={{ borderLeft: '4px solid var(--blue)' }}>
+                  <div className="kpi-icon" style={{ color: 'var(--blue)' }}><i className="fa-solid fa-user-group"></i></div>
+                  <div className="kpi-val">{userViolations.length === 0 ? 'Top 1%' : 'Top 25%'}</div>
+                  <div className="kpi-lbl">Campus Health Standings</div>
                 </div>
               </div>
 
-              <div className="c">
-                <div className="c-head">
-                  <div>
-                    <div className="c-title"><i className="fa-solid fa-chart-line me-2" style={{ color: 'var(--red)' }}></i>7-Day Trend</div>
-                    <div className="c-sub">Campus-wide daily violation count</div>
+              <div className="grid-2 mb-4">
+                {/* 7-Day Personal Trend */}
+                <div className="c">
+                  <div className="c-head">
+                    <div>
+                      <div className="c-title"><i className="fa-solid fa-chart-line me-2" style={{ color: 'var(--red)' }}></i>My 7-Day Trend</div>
+                      <div className="c-sub">Your personal logged instances this week</div>
+                    </div>
+                  </div>
+                  <div className="c-body">
+                    <div className="chart-h240">
+                      <Line data={userTrendData} options={commonOptions} />
+                    </div>
                   </div>
                 </div>
-                <div className="c-body"><div className="chart-h240"><Line data={trendData} options={commonOptions} /></div></div>
+
+                {/* Personal Breakdown by Type */}
+                <div className="c">
+                  <div className="c-head">
+                    <div>
+                      <div className="c-title"><i className="fa-solid fa-chart-pie me-2" style={{ color: 'var(--purple)' }}></i>Breakdown by Device</div>
+                      <div className="c-sub">Incidents categorized by detection signature</div>
+                    </div>
+                  </div>
+                  <div className="c-body">
+                    {userViolations.length === 0 ? (
+                      <div className="empty-state" style={{ height: '240px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+                        <i className="fa-solid fa-circle-check fa-2x mb-2" style={{ color: 'var(--green)' }}></i>
+                        <p>No device violations recorded</p>
+                      </div>
+                    ) : (
+                      <div className="chart-h240">
+                        <Doughnut data={userTypeData} options={{ ...commonOptions, cutout: '70%' }} />
+                      </div>
+                    )}
+                  </div>
+                </div>
               </div>
 
-              <div className="c mt-3" style={{ border: '1px solid rgba(239,68,68,0.15)', background: 'rgba(239,68,68,0.03)' }}>
-                <div className="c-body" style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-                  <div style={{ width: 44, height: 44, borderRadius: 12, background: 'rgba(239,68,68,0.1)', color: 'var(--red)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, flexShrink: 0 }}>
-                    <i className="fa-solid fa-lock"></i>
+              {/* Personal Locations Bar */}
+              <div className="grid-2 mb-4">
+                <div className="c">
+                  <div className="c-head">
+                    <div>
+                      <div className="c-title"><i className="fa-solid fa-location-arrow me-2" style={{ color: 'var(--blue)' }}></i>Most Visited Warning Zones</div>
+                      <div className="c-sub">Locations where detections were registered</div>
+                    </div>
                   </div>
-                  <div>
-                    <div style={{ fontWeight: 700, color: 'var(--tx1)', marginBottom: 4 }}>Full Analytics Restricted</div>
-                    <div style={{ fontSize: 13, color: 'var(--tx3)' }}>Zone heatmaps, hourly breakdowns, week comparisons, and person-level data are available to administrators only.</div>
+                  <div className="c-body">
+                    {userViolations.length === 0 ? (
+                      <div className="empty-state" style={{ height: '240px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+                        <i className="fa-solid fa-map-location-dot fa-2x mb-2" style={{ color: 'var(--blue)' }}></i>
+                        <p>Your campus footprint is completely clean</p>
+                      </div>
+                    ) : (
+                      <div className="chart-h240">
+                        <Bar data={userLocationData} options={commonOptions} />
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Nicotine Quit Advisory Support */}
+                <div className="c" style={{ border: '1px solid rgba(16, 185, 129, 0.2)', background: 'rgba(16, 185, 129, 0.02)' }}>
+                  <div className="c-head">
+                    <div>
+                      <div className="c-title"><i className="fa-solid fa-hand-holding-heart me-2" style={{ color: 'var(--green)' }}></i>Personal Cessation Support</div>
+                      <div className="c-sub">Smart automated wellness coaching suggestions</div>
+                    </div>
+                  </div>
+                  <div className="c-body">
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                      <div style={{ background: 'var(--card)', border: '1px solid var(--border)', padding: '16px', borderRadius: 12 }}>
+                        <div style={{ fontWeight: 700, color: 'var(--tx1)', marginBottom: '6px', fontSize: '14px' }}>
+                          <i className="fa-solid fa-brain me-2" style={{ color: 'var(--amber)' }}></i>Quitting Tip of the Day
+                        </div>
+                        <div style={{ fontSize: '13px', color: 'var(--tx3)', lineHeight: 1.6 }}>
+                          {userViolations.length > 0 
+                            ? "We noticed some detections registered. Quitting is a journey—substituting cravings with a quick 5-minute sugar-free chewable candy or holding a straw can mimic hand-to-mouth habits and significantly reduce the urge."
+                            : "Splendid job! Maintaining a clean record is excellent for your cardiovascular endurance. Consistent clean weeks can increase lung capacity by up to 30%!"}
+                        </div>
+                      </div>
+                      <div style={{ background: 'var(--card)', border: '1px solid var(--border)', padding: '16px', borderRadius: 12 }}>
+                        <div style={{ fontWeight: 700, color: 'var(--tx1)', marginBottom: '6px', fontSize: '14px' }}>
+                          <i className="fa-solid fa-stethoscope me-2" style={{ color: 'var(--blue)' }}></i>Health Milestones
+                        </div>
+                        <ul style={{ fontSize: '13px', color: 'var(--tx3)', paddingLeft: '18px', margin: 0, lineHeight: 1.8 }}>
+                          <li><strong>24 Hours:</strong> Nicotine levels in the bloodstream drop to near-zero.</li>
+                          <li><strong>48 Hours:</strong> Nerve endings start regenerating; smell and taste senses improve.</li>
+                          <li><strong>1 Year:</strong> Excess risk of coronary heart disease is halved compared to active smokers.</li>
+                        </ul>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>

@@ -3,16 +3,17 @@ import threading
 import datetime
 import cv2
 from ultralytics import YOLO
-from database import insert_violation
+from database import insert_violation, get_user_email
 from email_service import send_violation_email
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_DIR = os.path.join(BASE_DIR, "VIRSION 1", "models")
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "images")
 
-_thread = None
+_threads = []
 _stop_event = threading.Event()
 _models = {}
+_latest_frames = {}
 
 
 def _load_models():
@@ -20,6 +21,7 @@ def _load_models():
     if _models:
         return
     _models = {
+        'person':    YOLO(os.path.join(BASE_DIR, "VIRSION 1", "yolov8n.pt")),
         'cigarette': YOLO(os.path.join(MODEL_DIR, "cigarette_best1.pt")),
         'smoke':     YOLO(os.path.join(MODEL_DIR, "smoke_best.pt")),
         'vape':      YOLO(os.path.join(MODEL_DIR, "vape_best.pt")),
@@ -27,22 +29,9 @@ def _load_models():
     }
 
 
-CONF_THRESHOLD = 0.65   # minimum confidence to consider a detection
-CONFIRM_FRAMES = 3      # consecutive frames that must agree before logging
+CONF_THRESHOLD = 0.55   # optimized threshold for targeted crops
 ALERT_COOLDOWN = 10     # seconds between logged violations
-
-
-def _detect_class(frame):
-    """Return (class_name, confidence) of highest-confidence detection, or (None, 0)."""
-    best_cls, best_conf = None, 0.0
-    for cls_name in ('cigarette', 'smoke', 'vape'):
-        results = _models[cls_name](frame, conf=CONF_THRESHOLD, verbose=False)
-        for r in results:
-            for box in r.boxes:
-                c = float(box.conf[0])
-                if c >= CONF_THRESHOLD and c > best_conf:
-                    best_cls, best_conf = cls_name, c
-    return best_cls, best_conf
+CONFIRM_FRAMES = 2      # reduced consecutive frames since search is highly targeted
 
 
 def _detection_loop(camera_index, location):
@@ -65,7 +54,96 @@ def _detection_loop(camera_index, location):
         if not ret:
             break
 
-        detected_cls, conf = _detect_class(frame)
+        # Generate live frame with annotations
+        annotated_frame = frame.copy()
+        detected_cls, conf = None, 0.0
+        
+        # Load models safely
+        _load_models()
+        
+        # Stage 1: Fast Pretrained Person Detection
+        person_results = _models['person'](frame, classes=[0], conf=0.45, verbose=False)
+        has_person = False
+        culprit_box = None
+        
+        for pr in person_results:
+            for pbox in pr.boxes:
+                has_person = True
+                px1, py1, px2, py2 = map(int, pbox.xyxy[0])
+                
+                # Dynamic crop padding (extract upper-body / surrounding of the person)
+                h, w, _ = frame.shape
+                pad_x = int((px2 - px1) * 0.15)
+                pad_y = int((py2 - py1) * 0.15)
+                
+                x1_crop = max(0, px1 - pad_x)
+                y1_crop = max(0, py1 - pad_y)
+                x2_crop = min(w, px2 + pad_x)
+                y2_crop = min(h, py2 + pad_y)
+                
+                crop = frame[y1_crop:y2_crop, x1_crop:x2_crop]
+                if crop.size == 0:
+                    continue
+                
+                # Stage 2: Smoking, Vape, and Smoke Cloud targeted local classification
+                for cls_name in ('cigarette', 'smoke', 'vape'):
+                    if cls_name in _models:
+                        # Elevate threshold for high-false-positive categories
+                        current_threshold = 0.68 if cls_name in ('cigarette', 'vape') else 0.55
+                        
+                        results = _models[cls_name](crop, conf=current_threshold, verbose=False)
+                        for r in results:
+                            for box in r.boxes:
+                                c = float(box.conf[0])
+                                if c >= current_threshold and c > conf:
+                                    # Translate local crop coordinates
+                                    cx1, cy1, cx2, cy2 = map(int, box.xyxy[0])
+                                    obj_w = cx2 - cx1
+                                    obj_h = cy2 - cy1
+                                    crop_h, crop_w, _ = crop.shape
+                                    
+                                    # Spatial scale heuristic: a vape or cigarette is a small hand-held item.
+                                    # Discard massive vertical objects (like faces, phones, or whole forearms).
+                                    rel_h = obj_h / crop_h
+                                    rel_w = obj_w / crop_w
+                                    
+                                    if cls_name == 'cigarette':
+                                        if rel_h > 0.18 or rel_w > 0.18:
+                                            continue  # Discard massive false-positive shapes
+                                    elif cls_name == 'vape':
+                                        if rel_h > 0.22 or rel_w > 0.22:
+                                            continue  # Discard massive false-positive shapes
+                                    elif cls_name == 'smoke':
+                                        if rel_h > 0.50 or rel_w > 0.50:
+                                            continue  # Discard large shadows/reflections
+                                            
+                                    detected_cls, conf = cls_name, c
+                                    culprit_box = (px1, py1, px2, py2)
+                                    
+                                    fx1, fy1, fx2, fy2 = cx1 + x1_crop, cy1 + y1_crop, cx2 + x1_crop, cy2 + y1_crop
+                                    
+                                    # Highlight exact violation object
+                                    cv2.rectangle(annotated_frame, (fx1, fy1), (fx2, fy2), (0, 0, 255), 2)
+                                    cv2.putText(annotated_frame, f"{cls_name.upper()} {c:.0%}", (fx1, fy1 - 10),
+                                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+
+        # Draw real-time reactive bounding boxes over persons
+        if has_person:
+            for pr in person_results:
+                for pbox in pr.boxes:
+                    px1, py1, px2, py2 = map(int, pbox.xyxy[0])
+                    if culprit_box and culprit_box == (px1, py1, px2, py2):
+                        # Red warning border for verified violators
+                        cv2.rectangle(annotated_frame, (px1, py1), (px2, py2), (0, 0, 255), 2)
+                        cv2.putText(annotated_frame, f"VIOLATION: {detected_cls.upper()}", (px1, py1 - 10),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                    else:
+                        # Green compliant border for healthy bystanders
+                        cv2.rectangle(annotated_frame, (px1, py1), (px2, py2), (0, 255, 0), 2)
+                        cv2.putText(annotated_frame, "COMPLIANT", (px1, py1 - 10),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+        _latest_frames[camera_index] = annotated_frame
 
         # Require CONFIRM_FRAMES consecutive detections of the same class
         if detected_cls and detected_cls == pending_cls:
@@ -103,7 +181,8 @@ def _detection_loop(camera_index, location):
 
         if (now - last_email_time).total_seconds() > 60:
             try:
-                send_violation_email(img_path, "admin@example.com")
+                recipient = get_user_email(person_name) or "admin@example.com"
+                send_violation_email(img_path, recipient, person_name, pending_cls, location, timestamp)
                 last_email_time = now
             except Exception as e:
                 print(f"[Detection] Email failed: {e}")
@@ -112,26 +191,135 @@ def _detection_loop(camera_index, location):
     print(f"[Detection] Stopped on camera {camera_index}")
 
 
-def start_detection(camera_index=0, location="Camera 1"):
-    global _thread
-    if _thread and _thread.is_alive():
-        return False
-    _stop_event.clear()
-    _thread = threading.Thread(
-        target=_detection_loop,
-        args=(camera_index, location),
-        daemon=True
-    )
-    _thread.start()
+_user_cooldowns = {}
+
+def process_user_frame(frame, username, location="Student Webcam"):
+    _load_models()
+    annotated_frame = frame.copy()
+    detected_cls, conf = None, 0.0
+    
+    # Stage 1: Fast Pretrained Person Detection
+    person_results = _models['person'](frame, classes=[0], conf=0.45, verbose=False)
+    has_person = False
+    culprit_box = None
+    
+    for pr in person_results:
+        for pbox in pr.boxes:
+            has_person = True
+            px1, py1, px2, py2 = map(int, pbox.xyxy[0])
+            
+            # Dynamic crop padding (extract upper-body)
+            h, w, _ = frame.shape
+            pad_x = int((px2 - px1) * 0.15)
+            pad_y = int((py2 - py1) * 0.15)
+            
+            x1_crop = max(0, px1 - pad_x)
+            y1_crop = max(0, py1 - pad_y)
+            x2_crop = min(w, px2 + pad_x)
+            y2_crop = min(h, py2 + pad_y)
+            
+            crop = frame[y1_crop:y2_crop, x1_crop:x2_crop]
+            if crop.size == 0:
+                continue
+                
+            # Stage 2: Smoking, Vape, and Smoke Cloud targeted local classification
+            for cls_name in ('cigarette', 'smoke', 'vape'):
+                if cls_name in _models:
+                    current_threshold = 0.68 if cls_name in ('cigarette', 'vape') else 0.55
+                    results = _models[cls_name](crop, conf=current_threshold, verbose=False)
+                    for r in results:
+                        for box in r.boxes:
+                            c = float(box.conf[0])
+                            if c >= current_threshold and c > conf:
+                                cx1, cy1, cx2, cy2 = map(int, box.xyxy[0])
+                                obj_w = cx2 - cx1
+                                obj_h = cy2 - cy1
+                                crop_h, crop_w, _ = crop.shape
+                                
+                                rel_h = obj_h / crop_h
+                                rel_w = obj_w / crop_w
+                                
+                                # Guardrails
+                                if cls_name == 'cigarette':
+                                    if rel_h > 0.18 or rel_w > 0.18:
+                                        continue
+                                elif cls_name == 'vape':
+                                    if rel_h > 0.22 or rel_w > 0.22:
+                                        continue
+                                elif cls_name == 'smoke':
+                                    if rel_h > 0.50 or rel_w > 0.50:
+                                        continue
+                                        
+                                detected_cls, conf = cls_name, c
+                                culprit_box = (px1, py1, px2, py2)
+                                
+                                fx1, fy1, fx2, fy2 = cx1 + x1_crop, cy1 + y1_crop, cx2 + x1_crop, cy2 + y1_crop
+                                cv2.rectangle(annotated_frame, (fx1, fy1), (fx2, fy2), (0, 0, 255), 2)
+                                cv2.putText(annotated_frame, f"{cls_name.upper()} {c:.0%}", (fx1, fy1 - 10),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                                            
+    # Bounding boxes
+    if has_person:
+        for pr in person_results:
+            for pbox in pr.boxes:
+                px1, py1, px2, py2 = map(int, pbox.xyxy[0])
+                if culprit_box and culprit_box == (px1, py1, px2, py2):
+                    cv2.rectangle(annotated_frame, (px1, py1), (px2, py2), (0, 0, 255), 2)
+                    cv2.putText(annotated_frame, f"VIOLATION: {detected_cls.upper()}", (px1, py1 - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                else:
+                    cv2.rectangle(annotated_frame, (px1, py1), (px2, py2), (0, 255, 0), 2)
+                    cv2.putText(annotated_frame, "COMPLIANT", (px1, py1 - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+    # Cooldown & log writing
+    if detected_cls:
+        global _user_cooldowns
+        now = datetime.datetime.now()
+        last_t = _user_cooldowns.get(username, datetime.datetime.min)
+        if (now - last_t).total_seconds() >= 10.0:  # 10s cooldown per user to prevent duplicate fine logging
+            _user_cooldowns[username] = now
+            
+            timestamp = now.strftime("%Y-%m-%d %H-%M-%S")
+            img_filename = f"user_{username.replace(' ', '_')}_{timestamp}.jpg"
+            img_path = os.path.join(STATIC_DIR, img_filename)
+            cv2.imwrite(img_path, frame)
+            rel_path = f"static/images/{img_filename}"
+            
+            insert_violation(timestamp, rel_path, username, location, detected_type=detected_cls)
+            print(f"[AI Multi-Stream] VIOLATION LOGGED: user {username} caught with {detected_cls} on webcam")
+            
+            try:
+                recipient = get_user_email(username) or "admin@example.com"
+                send_violation_email(img_path, recipient, username, detected_cls, location, timestamp)
+            except Exception as e:
+                print(f"[Detection] Email failed: {e}")
+                
+    return annotated_frame, detected_cls is not None
+
+
+_detection_active = False
+
+def start_detection(cameras=None):
+    global _detection_active
+    _detection_active = True
+    print("[AI Surveillance] Detection mode activated globally. Listening for client webcam streams...")
     return True
 
 
 def stop_detection():
-    _stop_event.set()
+    global _detection_active
+    _detection_active = False
+    print("[AI Surveillance] Detection mode deactivated.")
 
 
 def is_running():
-    return _thread is not None and _thread.is_alive()
+    global _detection_active
+    return _detection_active
+
+
+def get_latest_frame(camera_index):
+    return _latest_frames.get(camera_index, None)
 
 
 if __name__ == "__main__":
