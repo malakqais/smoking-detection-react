@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 
 
 export default function useDetectionSettingsSync() {
-  const [confThresh, setConfThresh] = useState(50);
+  const [confThresh, setConfThresh] = useState(48);
   const [enabledClasses, setEnabledClasses] = useState({ cigarette: true, smoke: true, vape: true });
   const [settingsSynced, setSettingsSynced] = useState(false);
 

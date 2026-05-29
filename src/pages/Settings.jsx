@@ -87,7 +87,7 @@ const Settings = () => {
   const [smtpPasswordSet, setSmtpPasswordSet] = useState(false);
 
   // Detection
-  const [throttle, setThrottle] = useLocalStorage('throttle', 3);
+  const [throttle, setThrottle] = useLocalStorage('throttle', 60);
   const [autoCapture, setAutoCapture] = useLocalStorage('autoCapture', true);
   const { confThresh, setConfThresh, enabledClasses, updateEnabledClasses } = useDetectionSettingsSync();
 
@@ -989,9 +989,9 @@ const Settings = () => {
                       <span className="flabel mb-0">Client webcam upload frame rate</span>
                       <span style={{ color: 'var(--blue)', fontWeight: 600 }}>{throttle} FPS</span>
                     </div>
-                    <input type="range" className="form-range w-100" min="1" max="30" value={throttle} onChange={e => setThrottle(+e.target.value)} style={{ accentColor: 'var(--blue)' }} />
+                    <input type="range" className="form-range w-100" min="1" max="60" value={throttle} onChange={e => setThrottle(+e.target.value)} style={{ accentColor: 'var(--blue)' }} />
                     <div className="d-flex justify-content-between" style={{ color: 'var(--tx3)', fontSize: '12px' }}>
-                      <span>1 FPS (lighter)</span><span>30 FPS (smoother)</span>
+                      <span>1 FPS (lighter)</span><span>60 FPS (smoother)</span>
                     </div>
                   </div>
                   <SRow icon="fa-camera" iconBg="rgba(168,85,247,0.1)" iconColor="var(--purple)" label="Auto-capture screenshot" desc="Save a JPEG snapshot for every detection event">

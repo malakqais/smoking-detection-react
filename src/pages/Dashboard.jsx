@@ -86,8 +86,8 @@ const Dashboard = () => {
           video.play();
 
           const autoCapture = localStorage.getItem('autoCapture') !== 'false';
-          const uploadFps = Math.max(1, Number(localStorage.getItem('throttle') || 8));
-          const uploadIntervalMs = Math.max(33, Math.round(1000 / uploadFps));
+          const uploadFps = Math.max(1, Number(localStorage.getItem('throttle') || 60));
+          const uploadIntervalMs = Math.max(16, Math.round(1000 / uploadFps));
           activeInterval = setInterval(() => {
             if (!autoCapture) return;
             if (video.readyState === video.HAVE_ENOUGH_DATA) {
