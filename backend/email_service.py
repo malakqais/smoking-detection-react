@@ -1,10 +1,17 @@
 import smtplib
 from email.message import EmailMessage
+from database import get_app_setting
 
 # Gmail SMTP credentials
 # NOTE: For production, move these to environment variables (os.environ)
 SMTP_EMAIL = "smokingdetection@gmail.com"
 SMTP_APP_PASSWORD = "eakzvbwwarvjlvrm"
+
+
+def _smtp_credentials():
+    configured_email = get_app_setting("smtp_sender_email", SMTP_EMAIL)
+    configured_password = get_app_setting("smtp_app_password", SMTP_APP_PASSWORD)
+    return configured_email, configured_password
 
 
 def send_violation_email(image_path, recipient_email, violator_name="Unknown", detected_item="Unknown", location="Monitored Zone", timestamp="Unknown"):
@@ -23,8 +30,9 @@ def send_violation_email(image_path, recipient_email, violator_name="Unknown", d
         True if sent successfully, False otherwise.
     """
     msg = EmailMessage()
+    smtp_email, smtp_password = _smtp_credentials()
     msg['Subject'] = f'⚠️ URGENT: {detected_item} Violation Detected — SmokeDet System'
-    msg['From'] = SMTP_EMAIL
+    msg['From'] = smtp_email
     msg['To'] = recipient_email
 
     body = f"""
@@ -70,7 +78,7 @@ def send_violation_email(image_path, recipient_email, violator_name="Unknown", d
         # Connect to Gmail SMTP with TLS encryption on port 587
         with smtplib.SMTP('smtp.gmail.com', 587) as server:
             server.starttls()
-            server.login(SMTP_EMAIL, SMTP_APP_PASSWORD)
+            server.login(smtp_email, smtp_password)
             server.send_message(msg)
 
         print(f"✅ Violation email sent successfully to {recipient_email} (violator: {violator_name})")
@@ -80,13 +88,18 @@ def send_violation_email(image_path, recipient_email, violator_name="Unknown", d
         print(f"❌ Email Delivery Failed: {e}")
         return False
 
-def send_test_email(recipient_email):
+def send_test_email(recipient_email, smtp_email=None, smtp_app_password=None):
     """
     Sends a test connection email to verify SMTP settings.
     """
+    if smtp_email and smtp_app_password:
+        test_email, test_password = smtp_email, smtp_app_password
+    else:
+        test_email, test_password = _smtp_credentials()
+
     msg = EmailMessage()
     msg['Subject'] = '✅ SMTP Connection Test — SmokeDet System'
-    msg['From'] = SMTP_EMAIL
+    msg['From'] = test_email
     msg['To'] = recipient_email
 
     body = f"""
@@ -102,7 +115,7 @@ def send_test_email(recipient_email):
     try:
         with smtplib.SMTP('smtp.gmail.com', 587) as server:
             server.starttls()
-            server.login(SMTP_EMAIL, SMTP_APP_PASSWORD)
+            server.login(test_email, test_password)
             server.send_message(msg)
 
         print(f"✅ Test email sent successfully to {recipient_email}")

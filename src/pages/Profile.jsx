@@ -19,6 +19,8 @@ const Profile = () => {
   const [sessionDuration, setSessionDuration] = useState('0m 0s');
   const [lastProfileChange, setLastProfileChange] = useState(() => localStorage.getItem('lastProfileChange'));
   const lastPassChange = localStorage.getItem('lastPassChange');
+  const lastLoginNotificationAt = localStorage.getItem('lastLoginNotificationAt');
+  const loginNotifEnabled = localStorage.getItem('loginNotif') !== 'false';
 
   // For regular users — their violation tickets
   const [myTickets, setMyTickets] = useState([]);
@@ -453,6 +455,17 @@ const Profile = () => {
                   <div className="activity-item" style={{ border: 'none', paddingBottom: 0 }}>
                     <div className="activity-icon" style={{ background: 'rgba(139,92,246,0.1)', color: 'var(--purple)' }}><i className="fa-solid fa-stopwatch"></i></div>
                     <div><div className="activity-title">Current Session Duration</div><div className="activity-time">{sessionDuration}</div></div>
+                  </div>
+                  <div className="activity-item" style={{ border: 'none', paddingBottom: 0 }}>
+                    <div className="activity-icon" style={{ background: 'rgba(16,185,129,0.1)', color: 'var(--green)' }}><i className="fa-solid fa-bell"></i></div>
+                    <div>
+                      <div className="activity-title">Login Notifications</div>
+                      <div className="activity-time">
+                        {loginNotifEnabled
+                          ? `Enabled${lastLoginNotificationAt ? ` · Last sent ${new Date(parseInt(lastLoginNotificationAt, 10)).toLocaleString()}` : ' · No event yet'}`
+                          : 'Disabled'}
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>

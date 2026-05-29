@@ -172,9 +172,14 @@ const SignUp = () => {
                   onChange={(e) => setPassword(e.target.value)}
                   required
                 />
-                <span className="show-pass" onClick={() => setShowPassword(!showPassword)}>
+                <button
+                  type="button"
+                  className="show-pass"
+                  onClick={() => setShowPassword(!showPassword)}
+                  aria-label={showPassword ? "Hide password" : "Show password"}
+                >
                   <i className={`fa-solid ${showPassword ? 'fa-eye-slash' : 'fa-eye'}`}></i>
-                </span>
+                </button>
               </div>
               <div className="pw-strength">
                 <div className="pw-bar" style={{ width: pwStrength.width, background: pwStrength.color }}></div>

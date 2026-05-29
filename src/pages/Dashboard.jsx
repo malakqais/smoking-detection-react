@@ -12,6 +12,13 @@ import {
   Filler
 } from 'chart.js';
 import logo from '../assets/LOGO.png';
+import { playAlarmTone } from '../utils/alarmTone';
+import KpiCards from '../components/dashboard/KpiCards';
+import AiLogsPanel from '../components/dashboard/AiLogsPanel';
+import CameraGrid from '../components/dashboard/CameraGrid';
+import ViolationsTable from '../components/dashboard/ViolationsTable';
+import NotificationDrawer from '../components/dashboard/NotificationDrawer';
+import EvidenceModal from '../components/dashboard/EvidenceModal';
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Tooltip, Legend, Filler);
 
@@ -39,6 +46,7 @@ const Dashboard = () => {
   const [selectedEvidence, setSelectedEvidence] = useState(null);
   const alarmSound = useRef(null);
   const prevCount = useRef(0);
+  const lastSoundAlertRef = useRef(0);
 
   // Custom premium confirmation states
   const [showConfirmModal, setShowConfirmModal] = useState(false);
@@ -77,7 +85,11 @@ const Dashboard = () => {
           video.srcObject = stream;
           video.play();
 
+          const autoCapture = localStorage.getItem('autoCapture') !== 'false';
+          const uploadFps = Math.max(1, Number(localStorage.getItem('throttle') || 8));
+          const uploadIntervalMs = Math.max(33, Math.round(1000 / uploadFps));
           activeInterval = setInterval(() => {
+            if (!autoCapture) return;
             if (video.readyState === video.HAVE_ENOUGH_DATA) {
               const ctx = canvas.getContext('2d');
               ctx.drawImage(video, 0, 0, 640, 480);
@@ -91,7 +103,7 @@ const Dashboard = () => {
                 body: JSON.stringify({ username: user.name, image: base64Img })
               }).catch(err => console.error("[AI Stream] Upload failed", err));
             }
-          }, 33);
+          }, uploadIntervalMs);
         })
         .catch(err => {
           console.warn("[AI Stream] Webcam access denied or unavailable:", err);
@@ -115,137 +127,23 @@ const Dashboard = () => {
     `[${new Date().toLocaleTimeString()}] 🟡 Passive perimeter scanning engaged.`
   ]);
 
-  useEffect(() => {
-    if (!detectionRunning) {
-      setAiLogs(prev => [
-        `[${new Date().toLocaleTimeString()}] 🟡 Detection halted by supervisor. Bypassing GPU classification loops.`,
-        ...prev.slice(0, 15)
-      ]);
-      return;
-    }
-    
-    setAiLogs(prev => [
-      `[${new Date().toLocaleTimeString()}] 🚀 Active Detection Started! Connecting camera sockets...`,
-      ...prev.slice(0, 15)
-    ]);
-
-    const interval = setInterval(() => {
-      const logs = [
-        "🟢 Stage 1 (YOLOv8n Person Search): Room empty. Sleeping custom classification...",
-        "🟢 Stage 1 (YOLOv8n Person Search): No human shapes detected. Bypassing heavy signature models.",
-        "👤 Stage 1: human shape identified. Initializing Upper-Body Hands isolation...",
-        "🔍 Stage 2: Hand crop isolation isolated. Running custom Cigarette best-fit model...",
-        "🔍 Stage 2: Classification finished. Crop confidence: 0.12 (COMPLIANT). Bypass notification.",
-        "🔍 Stage 2: Hand region extracted. Running Vape classification best-fit model...",
-        "🟢 Stage 1: Compliant bystander tracking in effect. Signature: Healthy Campus Student.",
-        "⚡ Telemetry: Pipeline processing latency: 14ms | Model inference: 6ms | FPS: 29.4.",
-        "🟢 Core: Frame buffer buffer cleared cleanly. GPU temperature: 54°C."
-      ];
-      
-      const randomLog = logs[Math.floor(Math.random() * logs.length)];
-      setAiLogs(prev => [
-        `[${new Date().toLocaleTimeString()}] ${randomLog}`,
-        ...prev.slice(0, 15)
-      ]);
-    }, 4000);
-
-    return () => clearInterval(interval);
-  }, [detectionRunning]);
+  const fetchDetectionLogs = async () => {
+    try {
+      const res = await fetch('/api/detection/logs?limit=50');
+      if (!res.ok) return;
+      const logs = await res.json();
+      if (!Array.isArray(logs) || logs.length === 0) return;
+      const mapped = logs.map((entry) => {
+        const levelIcon = entry.level === 'error' ? '🔴' : entry.level === 'warn' ? '🟡' : '🟢';
+        return `[${entry.timestamp}] ${levelIcon} ${entry.message}`;
+      });
+      setAiLogs(mapped);
+    } catch {}
+  };
 
   const playAlarm = () => {
-    try {
-      const toneId = localStorage.getItem('alarmTone') || 'high_beep';
-      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      const now = audioCtx.currentTime;
-
-      if (toneId === 'high_beep') {
-        const osc = audioCtx.createOscillator();
-        const gain = audioCtx.createGain();
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(880, now);
-        gain.gain.setValueAtTime(0.5, now);
-        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.6);
-        osc.connect(gain);
-        gain.connect(audioCtx.destination);
-        osc.start();
-        osc.stop(now + 0.6);
-      } 
-      else if (toneId === 'double_pulse') {
-        const osc1 = audioCtx.createOscillator();
-        const gain1 = audioCtx.createGain();
-        osc1.type = 'square';
-        osc1.frequency.setValueAtTime(660, now);
-        gain1.gain.setValueAtTime(0.3, now);
-        gain1.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
-        osc1.connect(gain1);
-        gain1.connect(audioCtx.destination);
-        osc1.start();
-        osc1.stop(now + 0.25);
-
-        setTimeout(() => {
-          const osc2 = audioCtx.createOscillator();
-          const gain2 = audioCtx.createGain();
-          osc2.type = 'square';
-          osc2.frequency.setValueAtTime(880, now);
-          gain2.gain.setValueAtTime(0.3, now);
-          gain2.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
-          osc2.connect(gain2);
-          gain2.connect(audioCtx.destination);
-          osc2.start();
-          osc2.stop(now + 0.25);
-        }, 180);
-      } 
-      else if (toneId === 'cyber_siren') {
-        const osc = audioCtx.createOscillator();
-        const gain = audioCtx.createGain();
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(400, now);
-        osc.frequency.exponentialRampToValueAtTime(1000, now + 0.8);
-        gain.gain.setValueAtTime(0.3, now);
-        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.8);
-        osc.connect(gain);
-        gain.connect(audioCtx.destination);
-        osc.start();
-        osc.stop(now + 0.8);
-      } 
-      else if (toneId === 'soft_chime') {
-        const osc = audioCtx.createOscillator();
-        const gain = audioCtx.createGain();
-        osc.type = 'triangle';
-        osc.frequency.setValueAtTime(523.25, now);
-        gain.gain.setValueAtTime(0.6, now);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + 1.2);
-        osc.connect(gain);
-        gain.connect(audioCtx.destination);
-        osc.start();
-        osc.stop(now + 1.2);
-      } 
-      else if (toneId === 'nuclear_meltdown') {
-        const osc = audioCtx.createOscillator();
-        const gain = audioCtx.createGain();
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(220, now);
-        
-        const lfo = audioCtx.createOscillator();
-        const lfoGain = audioCtx.createGain();
-        lfo.frequency.value = 10;
-        lfoGain.gain.value = 50;
-        lfo.connect(lfoGain);
-        lfoGain.connect(osc.frequency);
-        
-        gain.gain.setValueAtTime(0.4, now);
-        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.9);
-        
-        osc.connect(gain);
-        gain.connect(audioCtx.destination);
-        lfo.start();
-        osc.start();
-        lfo.stop(now + 0.9);
-        osc.stop(now + 0.9);
-      }
-    } catch (e) {
-      console.error("Audio synthesiser blocked or unsupported", e);
-    }
+    const toneId = localStorage.getItem('alarmTone') || 'high_beep';
+    playAlarmTone(toneId);
   };
 
   useEffect(() => {
@@ -270,18 +168,16 @@ const Dashboard = () => {
         setMyViolations(userSpecific);
         if (data.length > prevCount.current && prevCount.current > 0) {
           const soundEnabled = localStorage.getItem('soundAlerts') !== 'false';
+          const cooldownSeconds = Math.max(1, Number(localStorage.getItem('alertCooldown') || 60));
+          const nowMs = Date.now();
           if (soundEnabled) {
-            playAlarm();
+            if (nowMs - lastSoundAlertRef.current >= cooldownSeconds * 1000) {
+              playAlarm();
+              lastSoundAlertRef.current = nowMs;
+            }
           }
 
-          // Dynamically log new incidents inside the Sci-Fi diagnostics console
-          const addedCount = data.length - prevCount.current;
-          const newItems = data.slice(0, addedCount);
-          newItems.forEach(v => {
-            const timeStr = new Date().toLocaleTimeString();
-            const logMsg = `[${timeStr}] 🔴 CRITICAL VIOLATION: Student ${v.name || 'Unknown'} detected with ${v.detected_type?.toUpperCase()} in ${v.location}! Penalty ticket generated.`;
-            setAiLogs(prev => [logMsg, ...prev].slice(0, 50));
-          });
+          fetchDetectionLogs();
         }
         prevCount.current = data.length;
       }
@@ -321,9 +217,11 @@ const Dashboard = () => {
   useEffect(() => {
     fetchViolations();
     fetchDetectionStatus();
+    fetchDetectionLogs();
     const poll = setInterval(() => {
       fetchViolations();
       fetchDetectionStatus();
+      fetchDetectionLogs();
     }, 5000);
     return () => clearInterval(poll);
   }, []);
@@ -492,6 +390,11 @@ const Dashboard = () => {
       prevCount.current = 0;
     });
     setShowConfirmModal(true);
+  };
+
+  const handleDeleteViolation = async (violationId) => {
+    await fetch(`/api/violations/${violationId}/delete`, { method: 'POST' });
+    setViolations(prev => prev.filter(x => x.id !== violationId));
   };
 
   if (loading) {
@@ -914,37 +817,12 @@ const Dashboard = () => {
       <div className={`sb-overlay ${sidebarOpen ? 'visible' : ''}`} onClick={() => setSidebarOpen(false)}></div>
       <div className={`notif-overlay ${notifOpen ? 'visible' : ''}`} onClick={() => setNotifOpen(false)}></div>
 
-      {/* Notification Drawer */}
-      <aside className={`notif-drawer ${notifOpen ? 'open' : ''}`}>
-        <div className="notif-head">
-          <div className="notif-head-title">
-            <i className="fa-solid fa-bell" style={{ color: 'var(--red)' }}></i> Notifications
-            <span className="notif-head-count">{violations.length}</span>
-          </div>
-          <div className="notif-head-actions">
-            <button className="btn-ghost btn-sm" onClick={() => setNotifOpen(false)}>Close</button>
-            <div className="ib" onClick={() => setNotifOpen(false)}><i className="fa-solid fa-xmark"></i></div>
-          </div>
-        </div>
-        <div className="notif-body">
-          {violations.length === 0 ? (
-            <div className="notif-empty"><i className="fa-solid fa-bell-slash"></i><p>No notifications yet</p></div>
-          ) : (
-            violations.slice(0, 30).map(v => (
-              <div key={v.id} className="notif-item unread fade-in">
-                <div className="notif-icon"><i className="fa-solid fa-triangle-exclamation"></i></div>
-                <div className="notif-content">
-                  <div className="notif-title">Smoking detected at {v.location}</div>
-                  <div className="notif-meta"><i className="fa-regular fa-clock me-1"></i>{v.time}</div>
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-        <div className="notif-foot">
-          <button className="btn-ghost btn-sm w-100" onClick={clearLogs}>Clear All</button>
-        </div>
-      </aside>
+      <NotificationDrawer
+        notifOpen={notifOpen}
+        violations={violations}
+        onClose={() => setNotifOpen(false)}
+        onClear={clearLogs}
+      />
 
       {/* Sidebar */}
       <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''} ${sidebarOpen ? 'open' : ''}`}>
@@ -1013,31 +891,11 @@ const Dashboard = () => {
         </header>
 
         <div className="content fade-in">
-          {/* KPIs */}
-          <div className="kpi-grid mb-4 stagger-1">
-            <div className="kpi r">
-              <div className="kpi-icon"><i className="fa-solid fa-triangle-exclamation"></i></div>
-              <div className="kpi-val">{todayCount}</div>
-              <div className="kpi-lbl">Today's Violations</div>
-            </div>
-            <div className="kpi a">
-              <div className="kpi-icon"><i className="fa-solid fa-calendar-week"></i></div>
-              <div className="kpi-val">{violations.length}</div>
-              <div className="kpi-lbl">Total Violations</div>
-            </div>
-            <div className="kpi g">
-              <div className="kpi-icon"><i className="fa-solid fa-crosshairs"></i></div>
-              <div className="kpi-val">92%</div>
-              <div className="kpi-lbl">Detection Accuracy</div>
-            </div>
-            <div className="kpi b">
-              <div className="kpi-icon"><i className="fa-solid fa-video"></i></div>
-              <div className="kpi-val" style={{ color: detectionRunning ? 'var(--green)' : 'var(--tx3)' }}>
-                {detectionRunning ? 'Active' : 'Off'}
-              </div>
-              <div className="kpi-lbl">Detection Status</div>
-            </div>
-          </div>
+          <KpiCards
+            todayCount={todayCount}
+            totalViolations={violations.length}
+            detectionRunning={detectionRunning}
+          />
 
           <div className="grid-2-1 stagger-2">
             <div className="c">
@@ -1055,223 +913,33 @@ const Dashboard = () => {
               </div>
             </div>
 
-            <div className="c stagger-2" style={{ border: '1px solid var(--border)', background: 'rgba(10,15,30,0.85)', backdropFilter: 'blur(16px)' }}>
-              <div className="c-head" style={{ borderBottom: '1px solid rgba(255,255,255,0.06)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div className="c-title" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <i className="fa-solid fa-terminal" style={{ color: 'var(--amber)', textShadow: '0 0 8px rgba(245,158,11,0.4)' }}></i>
-                  <span style={{ fontFamily: 'monospace', letterSpacing: '0.5px' }}>AI Core Micro-Diagnostics</span>
-                </div>
-                <span className="tag" style={{ background: detectionRunning ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)', color: detectionRunning ? 'var(--green)' : 'var(--red)', border: `1px solid ${detectionRunning ? 'rgba(16,185,129,0.3)' : 'rgba(239,68,68,0.3)'}`, fontSize: '10px' }}>
-                  <i className={`fa-solid ${detectionRunning ? 'fa-circle-dot fa-pulse' : 'fa-circle'} me-1`} style={{ fontSize: '7px' }}></i>
-                  {detectionRunning ? 'ACTIVE FLOW' : 'PAUSED'}
-                </span>
-              </div>
-              <div className="c-body" style={{ fontFamily: 'monospace', fontSize: '11px', padding: '16px', height: '240px', background: '#030712', borderRadius: '0 0 16px 16px', overflowY: 'auto', textAlign: 'left' }}>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  {aiLogs.map((log, idx) => {
-                    let color = '#38bdf8';
-                    if (log.includes('🔴') || log.includes('VIOLATION')) color = 'var(--red)';
-                    else if (log.includes('🟡') || log.includes('telemetry') || log.includes('Telemetry')) color = 'var(--amber)';
-                    else if (log.includes('🟢') || log.includes('Stage 1') || log.includes('Stage 2')) color = 'var(--green)';
-                    return (
-                      <div key={idx} style={{ color, wordBreak: 'break-all', textShadow: color === 'var(--red)' ? '0 0 4px rgba(239,68,68,0.3)' : 'none', lineHeight: '1.4' }}>
-                        {log}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
+            <AiLogsPanel aiLogs={aiLogs} detectionRunning={detectionRunning} />
           </div>
 
-          {/* Camera Feed Status */}
-          <div className="c mb-4 stagger-3">
-            <div className="c-head" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                <div className="hud-radar-scanner" title="Active Radar Zone Sweep"></div>
-                <div>
-                  <div className="c-title"><i className="fa-solid fa-camera me-2" style={{ color: 'var(--blue)' }}></i>AI Surveillance Matrix</div>
-                  <div className="c-sub">Stage 1 & Stage 2 Pipeline Active</div>
-                </div>
-              </div>
-              <span className={`tag ${detectionRunning ? 'g' : 'r'}`} style={{ boxShadow: detectionRunning ? '0 0 10px rgba(16,185,129,0.3)' : 'none' }}>{detectionRunning ? 'ACTIVE SCANNING' : 'SYSTEM IDLE'}</span>
-            </div>
-            <div className="c-body">
-              <div className="cam-grid">
-                {activeCams.map((cam, i) => (
-                  <div key={i}>
-                    <div className="cam-feed">
-                      {cam.active ? (
-                        <>
-                          <img 
-                            src={cam.isWebcam ? `/api/detection/video_feed_user/${encodeURIComponent(cam.userRef)}` : `/api/detection/video_feed/${i}`} 
-                            alt="Video Feed" 
-                            style={{ width: '100%', height: '100%', objectFit: 'cover', position: 'absolute', top: 0, left: 0, zIndex: 0 }}
-                            onError={(e) => { e.target.style.display = 'none'; }}
-                          />
-                          <div className="cf-hud-grid"></div>
-                          <div className="cf-hud-crosshair"></div>
-                          <div className="cf-hud-telemetry">
-                            LATENCY: {(10 + i * 2)}ms<br />
-                            FPS: 29.4 | 1080p<br />
-                            GPU INFERENCE: 6.2ms<br />
-                            STAGE-2: PERSON isol.
-                          </div>
-                        </>
-                      ) : (
-                        <div className="cf-grid"></div>
-                      )}
-                      <div className="scan-line" style={{ animationDelay: `${i * -1.1}s`, animationPlayState: cam.active ? 'running' : 'paused' }}></div>
-                      <div className="cf-corner tl"></div><div className="cf-corner tr"></div>
-                      <div className="cf-corner bl"></div><div className="cf-corner br"></div>
-                      <div className="cf-live">
-                        <div className="cf-live-dot" style={{ background: cam.active ? 'var(--red)' : 'var(--tx3)', animation: cam.active ? 'pulse-glow 1.5s infinite' : 'none' }}></div>
-                        {cam.active ? 'LIVE FEED' : 'STANDBY'}
-                      </div>
-                      <div className="cf-ts">{currentTime}</div>
-                      {cam.active && todayCount > 0 ? (
-                        <div className="cf-no-det" style={{ color: 'var(--red)', opacity: 1, textShadow: '0 0 8px rgba(239,68,68,0.5)' }}>
-                          <i className="fa-solid fa-triangle-exclamation fa-beat me-1"></i> {todayCount} today
-                        </div>
-                      ) : (
-                        <div className="cf-no-det"><i className="fa-solid fa-shield-check me-1"></i> {cam.active ? 'Clear' : 'Inactive'}</div>
-                      )}
-                      <div className="cf-info">
-                        <span className="cf-name"><i className="fa-solid fa-location-dot me-1" style={{ color: 'var(--red)' }}></i>{cam.name}</span>
-                        <span className="cf-fps" style={{ fontFamily: 'monospace' }}>SEC-{100 + i} | Stage 1 & 2 YOLOv8</span>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
+          <CameraGrid
+            activeCams={activeCams}
+            currentTime={currentTime}
+            todayCount={todayCount}
+            detectionRunning={detectionRunning}
+          />
 
-          {/* Logs Table */}
-          <div className="c">
-            <div className="c-head">
-              <div>
-                <div className="c-title"><i className="fa-solid fa-table-list me-2" style={{ color: 'var(--amber)' }}></i>Violation Logs</div>
-                <div className="c-sub">Full detection history</div>
-              </div>
-              <div style={{ display: 'flex', gap: '8px' }}>
-                {user.role === 'admin' && (
-                  <>
-                    <button className="btn-ghost btn-sm" onClick={exportCSV}><i className="fa-solid fa-download me-1"></i>Export</button>
-                    <button className="btn-ghost btn-sm" onClick={clearLogs}><i className="fa-solid fa-trash me-1"></i>Clear</button>
-                  </>
-                )}
-              </div>
-            </div>
-
-            <div className="tbl-controls">
-              <div className="search-wrap">
-                <i className="fa-solid fa-magnifying-glass"></i>
-                <input type="text" className="search-input" placeholder="Search..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
-              </div>
-              <select className="sel-filter" value={locFilter} onChange={e => setLocFilter(e.target.value)}>
-                <option value="">All Locations</option>
-                {locations.map(l => <option key={l} value={l}>{l}</option>)}
-              </select>
-              <span className="tbl-count">{filteredViolations.length} records</span>
-            </div>
-
-            <div style={{ overflowX: 'auto' }}>
-              <table className="tbl">
-                <thead>
-                  <tr><th>#</th><th>Timestamp</th><th>Location</th><th>Person</th><th>Detected</th><th>Evidence</th>{user.role === 'admin' && <th></th>}</tr>
-                </thead>
-                <tbody>
-                  {filteredViolations.length === 0 ? (
-                    <tr><td colSpan="7" className="text-center py-5 text-muted">No records found</td></tr>
-                  ) : (
-                    filteredViolations.map((v, i) => {
-                      const typeColor = { cigarette: 'var(--red)', smoke: '#94a3b8', vape: 'var(--purple)', unknown: 'var(--tx3)' };
-                      const typeIcon  = { cigarette: 'fa-smoking', smoke: 'fa-wind', vape: 'fa-vial', unknown: 'fa-circle-question' };
-                      const dt = v.detected_type || 'unknown';
-                      return (
-                        <tr key={v.id} className="fade-in">
-                          <td style={{ color: 'var(--tx3)' }}>{i + 1}</td>
-                          <td style={{ whiteSpace: 'nowrap' }}>{v.time}</td>
-                          <td>{v.location}</td>
-                          <td>{v.name}</td>
-                          <td>
-                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, fontWeight: 700, color: typeColor[dt] || 'var(--tx3)', background: `${typeColor[dt] || 'var(--tx3)'}18`, padding: '3px 9px', borderRadius: 99 }}>
-                              <i className={`fa-solid ${typeIcon[dt] || 'fa-circle-question'}`}></i>
-                              {dt}
-                            </span>
-                          </td>
-                          <td>
-                            <button className="btn-r btn-sm" onClick={() => setSelectedEvidence(v)}>
-                              <i className="fa-solid fa-image me-1"></i>View
-                            </button>
-                          </td>
-                          {user.role === 'admin' && (
-                            <td>
-                              <button
-                                className="ib btn-sm"
-                                title="Delete this violation"
-                                style={{ color: 'var(--tx3)' }}
-                                onClick={async () => {
-                                  await fetch(`/api/violations/${v.id}/delete`, { method: 'POST' });
-                                  setViolations(prev => prev.filter(x => x.id !== v.id));
-                                }}
-                              >
-                                <i className="fa-solid fa-trash"></i>
-                              </button>
-                            </td>
-                          )}
-                        </tr>
-                      );
-                    })
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
+          <ViolationsTable
+            userRole={user.role}
+            exportCSV={exportCSV}
+            clearLogs={clearLogs}
+            searchQuery={searchQuery}
+            setSearchQuery={setSearchQuery}
+            locFilter={locFilter}
+            setLocFilter={setLocFilter}
+            locations={locations}
+            filteredViolations={filteredViolations}
+            setSelectedEvidence={setSelectedEvidence}
+            onDeleteViolation={handleDeleteViolation}
+          />
         </div>
       </main>
 
-      {/* Evidence Modal */}
-      {selectedEvidence && (
-        <div className="modal d-block" style={{ background: 'rgba(0,0,0,0.8)', zIndex: 2000 }}>
-          <div className="modal-dialog modal-dialog-centered">
-            <div className="modal-content" style={{ background: 'var(--card-bg)', borderColor: 'var(--border)' }}>
-              <div className="modal-header border-0" style={{ borderBottom: '1px solid var(--border)' }}>
-                <h6 className="modal-title" style={{ color: 'var(--tx1)', display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <i className="fa-solid fa-image" style={{ color: 'var(--red)' }}></i>
-                  Violation Evidence
-                </h6>
-                <button className="btn-close btn-close-white" onClick={() => setSelectedEvidence(null)}></button>
-              </div>
-              <div className="modal-body">
-                {selectedEvidence.image ? (
-                  <img src={selectedEvidence.image} alt="Evidence" style={{ width: '100%', borderRadius: '10px', maxHeight: '320px', objectFit: 'contain', background: '#000' }} />
-                ) : (
-                  <div style={{ height: '200px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--tx3)', background: 'var(--card2)', borderRadius: 10 }}>
-                    <div className="text-center"><i className="fa-solid fa-image-slash fa-2x mb-2"></i><div>No image captured</div></div>
-                  </div>
-                )}
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 14 }}>
-                  {[
-                    { icon: 'fa-clock', label: 'Timestamp', val: selectedEvidence.time },
-                    { icon: 'fa-location-dot', label: 'Location', val: selectedEvidence.location },
-                    { icon: 'fa-user', label: 'Person', val: selectedEvidence.name },
-                    { icon: 'fa-smoking', label: 'Detected', val: selectedEvidence.detected_type || 'unknown' },
-                  ].map(r => (
-                    <div key={r.label} style={{ background: 'var(--card2)', borderRadius: 8, padding: '10px 12px' }}>
-                      <div style={{ fontSize: 10, color: 'var(--tx3)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 3 }}>
-                        <i className={`fa-solid ${r.icon} me-1`}></i>{r.label}
-                      </div>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--tx1)' }}>{r.val}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      <EvidenceModal selectedEvidence={selectedEvidence} onClose={() => setSelectedEvidence(null)} />
 
       {showConfirmModal && (
         <div style={{

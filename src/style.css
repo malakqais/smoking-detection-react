@@ -133,6 +133,27 @@ a { text-decoration: none; color: inherit; }
 /* Page content wrapper */
 .content { padding: 24px; }
 
+/* Compact density mode */
+[data-compact="true"] .content { padding: 16px; }
+[data-compact="true"] .top-bar { height: 60px; padding: 0 16px; }
+[data-compact="true"] .pg-title { font-size: 16px; }
+[data-compact="true"] .pg-sub { font-size: 11px; }
+[data-compact="true"] .c-head { padding: 14px 16px; }
+[data-compact="true"] .c-body { padding: 16px; }
+[data-compact="true"] .kpi-grid,
+[data-compact="true"] .grid-2,
+[data-compact="true"] .grid-2-1,
+[data-compact="true"] .grid-3 { gap: 12px; }
+[data-compact="true"] .kpi { padding: 14px; gap: 6px; }
+[data-compact="true"] .kpi-val { font-size: 22px; }
+[data-compact="true"] .tbl-controls { padding: 12px 16px; gap: 10px; }
+[data-compact="true"] .tbl th,
+[data-compact="true"] .tbl td { padding: 12px 16px; }
+[data-compact="true"] .sb-logo { padding: 14px 16px; }
+[data-compact="true"] .sb-nav { padding: 10px; }
+[data-compact="true"] .sb-item { padding: 9px 12px; font-size: 12.5px; }
+[data-compact="true"] .cam-grid { gap: 10px; }
+
 /* Common Chart/Feed Wrappers */
 .chart-h240, .chart-wrap { position: relative; height: 240px; }
 .chart-h280 { position: relative; height: 280px; }
@@ -294,7 +315,7 @@ a { text-decoration: none; color: inherit; }
 .input-icon-wrap { position: relative; }
 .input-icon-wrap .finput { padding-left: 40px; }
 .input-icon-wrap i { position: absolute; left: 13px; top: 50%; transform: translateY(-50%); color: var(--tx3); font-size: 14px; }
-.show-pass { position: absolute; right: 14px; top: 50%; transform: translateY(-50%); color: var(--tx3); cursor: pointer; font-size: 15px; transition: var(--tr); z-index: 10; display: flex; align-items: center; justify-content: center; width: 30px; height: 30px; }
+.show-pass { position: absolute; right: 14px; top: 50%; transform: translateY(-50%); color: var(--tx3); cursor: pointer; font-size: 15px; transition: var(--tr); z-index: 10; display: flex; align-items: center; justify-content: center; width: 30px; height: 30px; border: none; background: transparent; padding: 0; line-height: 1; }
 .show-pass:hover { color: var(--tx1); }
 
 .btn-auth { width: 100%; padding: 11px; font-size: 14px; font-weight: 700; border-radius: 9px; border: none; background: var(--red); color: #fff; cursor: pointer; transition: var(--tr); margin-top: 4px; font-family: inherit; letter-spacing: 0.02em; display: flex; align-items: center; justify-content: center; gap: 8px; }

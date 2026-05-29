@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import logo from '../assets/LOGO.png';
+import useDetectionSettingsSync from '../hooks/useDetectionSettingsSync';
+import { playAlarmTone } from '../utils/alarmTone';
+import { useLocalStorage } from '../components/useLocalStorage';
 
 const NAV = [
   { id: 'account',       icon: 'fa-user',                 label: 'Account',      desc: 'Profile & password' },
@@ -72,26 +75,27 @@ const Settings = () => {
   // Appearance (theme is already in state above)
 
   // Notifications
-  const [emailAlerts, setEmailAlerts] = useState(() => localStorage.getItem('emailAlerts') !== 'false');
-  const [soundAlerts, setSoundAlerts] = useState(() => localStorage.getItem('soundAlerts') !== 'false');
-  const [alarmTone, setAlarmTone] = useState(() => localStorage.getItem('alarmTone') || 'high_beep');
-  const [alertCooldown, setAlertCooldown] = useState(60);
+  const [emailAlerts, setEmailAlerts] = useLocalStorage('emailAlerts', true);
+  const [soundAlerts, setSoundAlerts] = useLocalStorage('soundAlerts', true);
+  const [alarmTone, setAlarmTone] = useLocalStorage('alarmTone', 'high_beep');
+  const [alertCooldown, setAlertCooldown] = useLocalStorage('alertCooldown', 60);
   const [smtpSender, setSmtpSender] = useState('');
   const [smtpAppPass, setSmtpAppPass] = useState('');
   const [smtpRecipient, setSmtpRecipient] = useState(user.email);
   const [smtpTesting, setSmtpTesting] = useState(false);
+  const [smtpSaving, setSmtpSaving] = useState(false);
+  const [smtpPasswordSet, setSmtpPasswordSet] = useState(false);
 
   // Detection
-  const [confThresh, setConfThresh] = useState(50);
-  const [throttle, setThrottle] = useState(3);
-  const [autoCapture, setAutoCapture] = useState(true);
-  const [enabledClasses, setEnabledClasses] = useState({ cigarette: true, smoke: true, vape: true });
+  const [throttle, setThrottle] = useLocalStorage('throttle', 3);
+  const [autoCapture, setAutoCapture] = useLocalStorage('autoCapture', true);
+  const { confThresh, setConfThresh, enabledClasses, updateEnabledClasses } = useDetectionSettingsSync();
 
   // Security
   const [twoFA, setTwoFA] = useState(() => user.two_factor_enabled === 1 || localStorage.getItem('twoFA') === 'true');
-  const [autoLogout, setAutoLogout] = useState(() => localStorage.getItem('autoLogout') !== 'false');
-  const [logoutTimeout, setLogoutTimeout] = useState(() => parseInt(localStorage.getItem('logoutTimeout') || '30'));
-  const [loginNotif, setLoginNotif] = useState(() => localStorage.getItem('loginNotif') !== 'false');
+  const [autoLogout, setAutoLogout] = useLocalStorage('autoLogout', true);
+  const [logoutTimeout, setLogoutTimeout] = useLocalStorage('logoutTimeout', 30);
+  const [loginNotif, setLoginNotif] = useLocalStorage('loginNotif', true);
 
   // Google 2FA Setup States
   const [show2FAModal, setShow2FAModal] = useState(false);
@@ -107,7 +111,7 @@ const Settings = () => {
   const [confirmCallback, setConfirmCallback] = useState(null);
 
   // Appearance extras
-  const [compactMode, setCompactMode] = useState(false);
+  const [compactMode, setCompactMode] = useLocalStorage('compactMode', false);
 
   // Cameras
   const [cameras, setCameras] = useState(() => {
@@ -123,6 +127,10 @@ const Settings = () => {
   // System
   const loginTime = useMemo(() => parseInt(localStorage.getItem('loginTime') || Date.now()), []);
   const [uptime, setUptime] = useState('0m 0s');
+  const [currentSessionStartedAt, setCurrentSessionStartedAt] = useState(() => parseInt(localStorage.getItem('loginTime') || Date.now()));
+  const [lastProfileChangeAt, setLastProfileChangeAt] = useState(() => localStorage.getItem('lastProfileChange'));
+  const [lastPassChangeAt, setLastPassChangeAt] = useState(() => localStorage.getItem('lastPassChange'));
+  const [lastLoginNotificationAt, setLastLoginNotificationAt] = useState(() => localStorage.getItem('lastLoginNotificationAt'));
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
@@ -130,32 +138,50 @@ const Settings = () => {
   }, [theme]);
 
   useEffect(() => {
+    document.documentElement.setAttribute('data-compact', compactMode ? 'true' : 'false');
+  }, [compactMode]);
+
+  useEffect(() => {
     localStorage.setItem('twoFA', twoFA);
   }, [twoFA]);
 
   useEffect(() => {
-    localStorage.setItem('emailAlerts', emailAlerts);
-  }, [emailAlerts]);
+    fetch('/api/detection/settings')
+      .then((r) => r.json())
+      .then((data) => {
+        if (typeof data.email_alerts === 'boolean') setEmailAlerts(data.email_alerts);
+        if (data.alert_cooldown !== null && data.alert_cooldown !== undefined) {
+          setAlertCooldown(Number(data.alert_cooldown));
+        }
+      })
+      .catch(() => {});
+  }, [setAlertCooldown, setEmailAlerts]);
 
   useEffect(() => {
-    localStorage.setItem('soundAlerts', soundAlerts);
-  }, [soundAlerts]);
+    if (user.role !== 'admin') return;
+    fetch('/api/settings/smtp')
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.smtp_sender) setSmtpSender(data.smtp_sender);
+        if (data.smtp_recipient) setSmtpRecipient(data.smtp_recipient);
+        if (typeof data.smtp_password_set === 'boolean') setSmtpPasswordSet(data.smtp_password_set);
+      })
+      .catch(() => {});
+  }, [user.role]);
 
   useEffect(() => {
-    localStorage.setItem('alarmTone', alarmTone);
-  }, [alarmTone]);
-
-  useEffect(() => {
-    localStorage.setItem('autoLogout', autoLogout);
-  }, [autoLogout]);
-
-  useEffect(() => {
-    localStorage.setItem('logoutTimeout', logoutTimeout);
-  }, [logoutTimeout]);
-
-  useEffect(() => {
-    localStorage.setItem('loginNotif', loginNotif);
-  }, [loginNotif]);
+    const t = setTimeout(() => {
+      fetch('/api/detection/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email_alerts: emailAlerts,
+          alert_cooldown: alertCooldown,
+        }),
+      }).catch(() => {});
+    }, 300);
+    return () => clearTimeout(t);
+  }, [emailAlerts, alertCooldown]);
 
   useEffect(() => {
     const t = setInterval(() => {
@@ -172,98 +198,7 @@ const Settings = () => {
   };
 
   const playTestTone = (toneId) => {
-    try {
-      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      const now = audioCtx.currentTime;
-
-      if (toneId === 'high_beep') {
-        const osc = audioCtx.createOscillator();
-        const gain = audioCtx.createGain();
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(880, now);
-        gain.gain.setValueAtTime(0.5, now);
-        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.6);
-        osc.connect(gain);
-        gain.connect(audioCtx.destination);
-        osc.start();
-        osc.stop(now + 0.6);
-      } 
-      else if (toneId === 'double_pulse') {
-        const osc1 = audioCtx.createOscillator();
-        const gain1 = audioCtx.createGain();
-        osc1.type = 'square';
-        osc1.frequency.setValueAtTime(660, now);
-        gain1.gain.setValueAtTime(0.3, now);
-        gain1.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
-        osc1.connect(gain1);
-        gain1.connect(audioCtx.destination);
-        osc1.start();
-        osc1.stop(now + 0.25);
-
-        setTimeout(() => {
-          const osc2 = audioCtx.createOscillator();
-          const gain2 = audioCtx.createGain();
-          osc2.type = 'square';
-          osc2.frequency.setValueAtTime(880, now);
-          gain2.gain.setValueAtTime(0.3, now);
-          gain2.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
-          osc2.connect(gain2);
-          gain2.connect(audioCtx.destination);
-          osc2.start();
-          osc2.stop(now + 0.25);
-        }, 180);
-      } 
-      else if (toneId === 'cyber_siren') {
-        const osc = audioCtx.createOscillator();
-        const gain = audioCtx.createGain();
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(400, now);
-        osc.frequency.exponentialRampToValueAtTime(1000, now + 0.8);
-        gain.gain.setValueAtTime(0.3, now);
-        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.8);
-        osc.connect(gain);
-        gain.connect(audioCtx.destination);
-        osc.start();
-        osc.stop(now + 0.8);
-      } 
-      else if (toneId === 'soft_chime') {
-        const osc = audioCtx.createOscillator();
-        const gain = audioCtx.createGain();
-        osc.type = 'triangle';
-        osc.frequency.setValueAtTime(523.25, now);
-        gain.gain.setValueAtTime(0.6, now);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + 1.2);
-        osc.connect(gain);
-        gain.connect(audioCtx.destination);
-        osc.start();
-        osc.stop(now + 1.2);
-      } 
-      else if (toneId === 'nuclear_meltdown') {
-        const osc = audioCtx.createOscillator();
-        const gain = audioCtx.createGain();
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(220, now);
-        
-        const lfo = audioCtx.createOscillator();
-        const lfoGain = audioCtx.createGain();
-        lfo.frequency.value = 10;
-        lfoGain.gain.value = 50;
-        lfo.connect(lfoGain);
-        lfoGain.connect(osc.frequency);
-        
-        gain.gain.setValueAtTime(0.4, now);
-        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.9);
-        
-        osc.connect(gain);
-        gain.connect(audioCtx.destination);
-        lfo.start();
-        osc.start();
-        lfo.stop(now + 0.9);
-        osc.stop(now + 0.9);
-      }
-    } catch (e) {
-      console.error("Audio synthesiser blocked or unsupported", e);
-    }
+    playAlarmTone(toneId);
   };
 
   const saveAll = async () => {
@@ -282,7 +217,14 @@ const Settings = () => {
           const updated = { ...user, name };
           setUser(updated);
           localStorage.setItem('user', JSON.stringify(updated));
-          if (newPass) { localStorage.setItem('lastPassChange', Date.now()); setNewPass(''); setConfirmPass(''); }
+          localStorage.setItem('lastProfileChange', Date.now().toString());
+          setLastProfileChangeAt(localStorage.getItem('lastProfileChange'));
+          if (newPass) {
+            localStorage.setItem('lastPassChange', Date.now().toString());
+            setLastPassChangeAt(localStorage.getItem('lastPassChange'));
+            setNewPass('');
+            setConfirmPass('');
+          }
           showToast('Settings saved successfully');
       } else {
           showToast('Error saving settings', false);
@@ -379,7 +321,11 @@ const Settings = () => {
       const res = await fetch('/api/settings/test-email', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ recipient: smtpRecipient })
+        body: JSON.stringify({
+          recipient: smtpRecipient,
+          smtp_sender: smtpSender,
+          smtp_app_password: smtpAppPass,
+        })
       });
       const data = await res.json();
       if (res.ok && data.status === 'success') {
@@ -391,6 +337,36 @@ const Settings = () => {
       showToast('Network error while sending email', false);
     } finally {
       setSmtpTesting(false);
+    }
+  };
+
+  const saveSmtp = async () => {
+    if (!smtpSender || (!smtpAppPass && !smtpPasswordSet)) {
+      showToast('SMTP sender and app password are required', false);
+      return;
+    }
+    setSmtpSaving(true);
+    try {
+      const res = await fetch('/api/settings/smtp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          smtp_sender: smtpSender,
+          smtp_app_password: smtpAppPass,
+          smtp_recipient: smtpRecipient,
+        }),
+      });
+      if (res.ok) {
+        setSmtpPasswordSet(!!smtpAppPass || smtpPasswordSet);
+        setSmtpAppPass('');
+        showToast('SMTP settings saved');
+      } else {
+        showToast('Failed to save SMTP settings', false);
+      }
+    } catch (e) {
+      showToast('Network error while saving SMTP settings', false);
+    } finally {
+      setSmtpSaving(false);
     }
   };
 
@@ -644,6 +620,9 @@ const Settings = () => {
                   <SRow icon="fa-key" iconBg="rgba(16,185,129,0.1)" iconColor="var(--green)" label="Login Notifications" desc="Get an email alert whenever a new session is started with your account">
                     <Toggle checked={loginNotif} onChange={setLoginNotif} />
                   </SRow>
+                  <div style={{ color: 'var(--tx3)', fontSize: '12px', marginTop: '-6px', marginBottom: '6px' }}>
+                    Last notification: {lastLoginNotificationAt ? new Date(parseInt(lastLoginNotificationAt, 10)).toLocaleString() : 'Never'}
+                  </div>
 
                   <div className="section-hdr mt-4"><i className="fa-solid fa-clock-rotate-left me-2"></i>Recent Activity</div>
                   <div className="activity-list">
@@ -651,28 +630,24 @@ const Settings = () => {
                       <div className="activity-dot" style={{ background: 'var(--green)' }}></div>
                       <div className="activity-body">
                         <div className="activity-title">Session started</div>
-                        <div className="activity-sub">This device · {new Date(parseInt(localStorage.getItem('loginTime') || Date.now())).toLocaleString()}</div>
+                        <div className="activity-sub">This device · {new Date(currentSessionStartedAt).toLocaleString()}</div>
                       </div>
                       <span className="tag g">Current</span>
                     </div>
-                    {localStorage.getItem('lastPassChange') && (
-                      <div className="activity-item">
-                        <div className="activity-dot" style={{ background: 'var(--blue)' }}></div>
-                        <div className="activity-body">
-                          <div className="activity-title">Password changed</div>
-                          <div className="activity-sub">This device · {new Date(parseInt(localStorage.getItem('lastPassChange'))).toLocaleString()}</div>
-                        </div>
+                    <div className="activity-item">
+                      <div className="activity-dot" style={{ background: 'var(--blue)' }}></div>
+                      <div className="activity-body">
+                        <div className="activity-title">Password changed</div>
+                        <div className="activity-sub">This device · {lastPassChangeAt ? new Date(parseInt(lastPassChangeAt, 10)).toLocaleString() : 'Never'}</div>
                       </div>
-                    )}
-                    {localStorage.getItem('lastProfileChange') && (
-                      <div className="activity-item">
-                        <div className="activity-dot" style={{ background: 'var(--tx3)' }}></div>
-                        <div className="activity-body">
-                          <div className="activity-title">Profile updated</div>
-                          <div className="activity-sub">This device · {new Date(parseInt(localStorage.getItem('lastProfileChange'))).toLocaleString()}</div>
-                        </div>
+                    </div>
+                    <div className="activity-item">
+                      <div className="activity-dot" style={{ background: 'var(--tx3)' }}></div>
+                      <div className="activity-body">
+                        <div className="activity-title">Profile updated</div>
+                        <div className="activity-sub">This device · {lastProfileChangeAt ? new Date(parseInt(lastProfileChangeAt, 10)).toLocaleString() : 'Never'}</div>
                       </div>
-                    )}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -851,7 +826,12 @@ const Settings = () => {
                         <div className="col-md-6">
                           <div className="fgroup mb-0">
                             <label className="flabel">App Password</label>
-                            <div className="input-icon-wrap"><i className="fa-solid fa-key"></i><input type="password" className="finput" value={smtpAppPass} onChange={e => setSmtpAppPass(e.target.value)} placeholder="Google App Password" /></div>
+                            <div className="input-icon-wrap"><i className="fa-solid fa-key"></i><input type="password" className="finput" value={smtpAppPass} onChange={e => setSmtpAppPass(e.target.value)} placeholder={smtpPasswordSet ? "******** (leave blank to keep current)" : "Google App Password"} /></div>
+                            {smtpPasswordSet && (
+                              <div style={{ fontSize: '11px', color: 'var(--tx3)', marginTop: '6px' }}>
+                                A password is already saved. Enter a new one only if you want to replace it.
+                              </div>
+                            )}
                           </div>
                         </div>
                         <div className="col-md-6">
@@ -867,9 +847,14 @@ const Settings = () => {
                           <div className="smtp-test-label">Send Test Email</div>
                           <div className="smtp-test-desc">Verify your SMTP settings are working correctly</div>
                         </div>
-                        <button className="btn-ghost" onClick={testSmtp} disabled={smtpTesting}>
-                          {smtpTesting ? <><i className="fa-solid fa-spinner fa-spin me-1"></i>Sending…</> : <><i className="fa-solid fa-paper-plane me-1"></i>Send Test</>}
-                        </button>
+                        <div style={{ display: 'flex', gap: '8px' }}>
+                          <button className="btn-ghost" onClick={saveSmtp} disabled={smtpSaving}>
+                            {smtpSaving ? <><i className="fa-solid fa-spinner fa-spin me-1"></i>Saving…</> : <><i className="fa-solid fa-floppy-disk me-1"></i>Save SMTP</>}
+                          </button>
+                          <button className="btn-ghost" onClick={testSmtp} disabled={smtpTesting}>
+                            {smtpTesting ? <><i className="fa-solid fa-spinner fa-spin me-1"></i>Sending…</> : <><i className="fa-solid fa-paper-plane me-1"></i>Send Test</>}
+                          </button>
+                        </div>
                       </div>
                     </>
                   )}
@@ -907,7 +892,10 @@ const Settings = () => {
                         <div
                           key={key}
                           className={`class-card ${on ? 'enabled' : ''}`}
-                          onClick={() => setEnabledClasses(p => ({ ...p, [key]: !on }))}
+                          onClick={() => {
+                            const updated = { ...enabledClasses, [key]: !on };
+                            updateEnabledClasses(updated);
+                          }}
                           style={{ borderColor: on ? m.color : 'var(--border)' }}
                         >
                           <div className="class-card-dot" style={{ background: m.color }}></div>
@@ -922,13 +910,89 @@ const Settings = () => {
                     })}
                   </div>
 
+                  {/* ── Dependency warning banner ── */}
+                  {(() => {
+                    const smokeOn = enabledClasses.smoke !== false;
+                    const cigOn   = enabledClasses.cigarette !== false;
+                    const vapeOn  = enabledClasses.vape !== false;
+                    const anyActive = smokeOn || cigOn || vapeOn;
+
+                    // Nothing enabled at all
+                    if (!anyActive) return (
+                      <div style={{
+                        display: 'flex', alignItems: 'flex-start', gap: '12px',
+                        background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.35)',
+                        borderRadius: '12px', padding: '12px 14px', marginBottom: '20px',
+                        animation: 'fadeIn 0.2s ease-out'
+                      }}>
+                        <i className="fa-solid fa-ban" style={{ color: 'var(--red)', marginTop: '2px', fontSize: '15px', flexShrink: 0 }}></i>
+                        <div>
+                          <div style={{ fontWeight: 700, fontSize: '13px', color: 'var(--red)', marginBottom: '3px' }}>
+                            No classes active — detection is off
+                          </div>
+                          <div style={{ fontSize: '12px', color: 'var(--tx2)', lineHeight: 1.5 }}>
+                            All detection classes are disabled. Enable at least <strong>Smoke</strong> to allow any violation to be logged.
+                          </div>
+                        </div>
+                      </div>
+                    );
+
+                    // Smoke disabled but cigarette or vape is on — they'll never fire
+                    if (!smokeOn && (cigOn || vapeOn)) return (
+                      <div style={{
+                        display: 'flex', alignItems: 'flex-start', gap: '12px',
+                        background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.4)',
+                        borderRadius: '12px', padding: '12px 14px', marginBottom: '20px',
+                        animation: 'fadeIn 0.2s ease-out'
+                      }}>
+                        <i className="fa-solid fa-triangle-exclamation" style={{ color: 'var(--amber)', marginTop: '2px', fontSize: '15px', flexShrink: 0 }}></i>
+                        <div>
+                          <div style={{ fontWeight: 700, fontSize: '13px', color: 'var(--amber)', marginBottom: '3px' }}>
+                            {[cigOn && 'Cigarette', vapeOn && 'Vape'].filter(Boolean).join(' & ')} will never trigger — Smoke is disabled
+                          </div>
+                          <div style={{ fontSize: '12px', color: 'var(--tx2)', lineHeight: 1.5 }}>
+                            The AI requires <strong>corroborating smoke evidence</strong> before logging a cigarette or vape violation
+                            (to prevent false positives from pens, fingers, etc.).
+                            Re-enable <strong>Smoke</strong>, or rely on smoke-only detection.
+                          </div>
+                        </div>
+                      </div>
+                    );
+
+                    // Smoke only — informational
+                    if (smokeOn && !cigOn && !vapeOn) return (
+                      <div style={{
+                        display: 'flex', alignItems: 'flex-start', gap: '12px',
+                        background: 'rgba(59,130,246,0.07)', border: '1px solid rgba(59,130,246,0.3)',
+                        borderRadius: '12px', padding: '12px 14px', marginBottom: '20px',
+                        animation: 'fadeIn 0.2s ease-out'
+                      }}>
+                        <i className="fa-solid fa-circle-info" style={{ color: 'var(--blue)', marginTop: '2px', fontSize: '15px', flexShrink: 0 }}></i>
+                        <div>
+                          <div style={{ fontWeight: 700, fontSize: '13px', color: 'var(--blue)', marginBottom: '3px' }}>
+                            Smoke-only mode active
+                          </div>
+                          <div style={{ fontSize: '12px', color: 'var(--tx2)', lineHeight: 1.5 }}>
+                            Only visible smoke clouds will trigger alerts (threshold ≥ 70%). 
+                            Cigarette and vape objects without smoke will be ignored.
+                          </div>
+                        </div>
+                      </div>
+                    );
+
+                    return null; // normal state — no warning needed
+                  })()}
+
                   <div className="section-hdr mb-3"><i className="fa-solid fa-gauge me-2"></i>Throttle & Capture</div>
                   <div className="mb-4">
                     <div className="d-flex justify-content-between mb-1">
-                      <span className="flabel mb-0">Minimum seconds between detections</span>
-                      <span style={{ color: 'var(--blue)', fontWeight: 600 }}>{throttle}s</span>
+                      <span className="flabel mb-0">Client webcam upload frame rate</span>
+                      <span style={{ color: 'var(--blue)', fontWeight: 600 }}>{throttle} FPS</span>
                     </div>
                     <input type="range" className="form-range w-100" min="1" max="30" value={throttle} onChange={e => setThrottle(+e.target.value)} style={{ accentColor: 'var(--blue)' }} />
+                    <div className="d-flex justify-content-between" style={{ color: 'var(--tx3)', fontSize: '12px' }}>
+                      <span>1 FPS (lighter)</span><span>30 FPS (smoother)</span>
+                    </div>
                   </div>
                   <SRow icon="fa-camera" iconBg="rgba(168,85,247,0.1)" iconColor="var(--purple)" label="Auto-capture screenshot" desc="Save a JPEG snapshot for every detection event">
                     <Toggle checked={autoCapture} onChange={setAutoCapture} />

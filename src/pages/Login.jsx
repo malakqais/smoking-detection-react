@@ -25,6 +25,30 @@ const Login = () => {
 
   const toggleTheme = () => setTheme(prev => prev === 'dark' ? 'light' : 'dark');
 
+  const establishSession = (userData) => {
+    const now = Date.now();
+    const sessionId = `${now}-${Math.random().toString(36).slice(2, 10)}`;
+
+    localStorage.setItem('isLoggedIn', 'true');
+    localStorage.setItem('loginTime', now.toString());
+    localStorage.setItem('activeSessionId', sessionId);
+    localStorage.setItem('user', JSON.stringify(userData));
+
+    const history = JSON.parse(localStorage.getItem('sessionHistory') || '[]');
+    history.unshift({
+      id: sessionId,
+      startedAt: now,
+      userEmail: userData?.email || email,
+      device: 'This device',
+    });
+    localStorage.setItem('sessionHistory', JSON.stringify(history.slice(0, 20)));
+
+    const loginNotifEnabled = localStorage.getItem('loginNotif') !== 'false';
+    if (loginNotifEnabled) {
+      localStorage.setItem('lastLoginNotificationAt', now.toString());
+    }
+  };
+
   const handleOTPChange = (value, index) => {
     if (value && isNaN(value)) return;
     const newOtp = [...otp];
@@ -66,9 +90,7 @@ const Login = () => {
       
       if (res.ok) {
         const result = await res.json();
-        localStorage.setItem('isLoggedIn', 'true');
-        localStorage.setItem('loginTime', Date.now().toString());
-        localStorage.setItem('user', JSON.stringify(result.user));
+        establishSession(result.user);
         navigate('/');
       } else {
         const result = await res.json().catch(() => ({ message: "Invalid verification code." }));
@@ -102,9 +124,7 @@ const Login = () => {
           setPendingUser(result.user);
           setShow2FA(true);
         } else {
-          localStorage.setItem('isLoggedIn', 'true');
-          localStorage.setItem('loginTime', Date.now().toString());
-          localStorage.setItem('user', JSON.stringify(result.user));
+          establishSession(result.user);
           navigate('/');
         }
       } else {
@@ -193,9 +213,14 @@ const Login = () => {
                       onChange={(e) => setPassword(e.target.value)}
                       required
                     />
-                    <span className="show-pass" onClick={() => setShowPassword(!showPassword)}>
+                    <button
+                      type="button"
+                      className="show-pass"
+                      onClick={() => setShowPassword(!showPassword)}
+                      aria-label={showPassword ? "Hide password" : "Show password"}
+                    >
                       <i className={`fa-solid ${showPassword ? 'fa-eye-slash' : 'fa-eye'}`}></i>
-                    </span>
+                    </button>
                   </div>
                 </div>
 

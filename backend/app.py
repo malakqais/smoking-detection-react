@@ -9,16 +9,21 @@ import base64
 import secrets
 import urllib.parse
 from werkzeug.security import generate_password_hash, check_password_hash
-from database import init_db
+from database import init_db, get_app_setting, set_app_setting
 from email_service import send_test_email
+from config import DB_PATH, ADMIN_DOMAIN, API_PORT, FLASK_DEBUG
 import detection as det
 
 app = Flask(__name__)
 init_db()
 
 
+def _connect_db():
+    return sqlite3.connect(DB_PATH)
+
+
 def _ensure_users_table():
-    conn = sqlite3.connect('violations.db')
+    conn = _connect_db()
     conn.execute('''CREATE TABLE IF NOT EXISTS users
                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
                      name TEXT,
@@ -41,12 +46,9 @@ def _ensure_users_table():
     conn.close()
 
 
-ADMIN_DOMAIN = '@smoker.jr'
-
-
 def _ensure_admin():
     """Ensure all @smoker.jr accounts have admin role and no other account does."""
-    conn = sqlite3.connect('violations.db')
+    conn = _connect_db()
     conn.execute("UPDATE users SET role = 'admin' WHERE email LIKE ?", (f'%{ADMIN_DOMAIN}',))
     conn.execute("UPDATE users SET role = 'user' WHERE email NOT LIKE ?", (f'%{ADMIN_DOMAIN}',))
     conn.commit()
@@ -102,7 +104,7 @@ def signup():
     role = 'admin' if email.endswith(ADMIN_DOMAIN) else 'user'
     hashed_pass = generate_password_hash(data['password'])
     try:
-        conn = sqlite3.connect('violations.db')
+        conn = _connect_db()
         conn.execute("INSERT INTO users (name, email, password, role, created_at) VALUES (?, ?, ?, ?, datetime('now'))",
                      (data['name'], email, hashed_pass, role))
         conn.commit()
@@ -117,7 +119,7 @@ def signup():
 @app.route('/login', methods=['POST'])
 def login():
     data = request.json
-    conn = sqlite3.connect('violations.db')
+    conn = _connect_db()
     user = conn.execute(
         "SELECT name, email, role, created_at, password, two_factor_enabled, two_factor_secret FROM users WHERE email = ?",
         (data['email'],)
@@ -128,7 +130,7 @@ def login():
         if stored_pass == data['password'] or check_password_hash(stored_pass, data['password']):
             # Auto-migrate password to hashed if it was plaintext
             if stored_pass == data['password']:
-                conn = sqlite3.connect('violations.db')
+                conn = _connect_db()
                 conn.execute("UPDATE users SET password = ? WHERE email = ?", (generate_password_hash(data['password']), email))
                 conn.commit()
                 conn.close()
@@ -153,12 +155,41 @@ def test_email_endpoint():
     recipient = data.get('recipient')
     if not recipient:
         return jsonify({"status": "error", "message": "Recipient required"}), 400
-    
-    success = send_test_email(recipient)
+
+    smtp_email = data.get('smtp_sender')
+    smtp_app_password = data.get('smtp_app_password')
+    success = send_test_email(recipient, smtp_email=smtp_email, smtp_app_password=smtp_app_password)
     if success:
         return jsonify({"status": "success", "message": f"Test email sent to {recipient}"})
     else:
         return jsonify({"status": "error", "message": "Failed to send email. Check SMTP configuration."}), 500
+
+
+@app.route('/api/settings/smtp', methods=['GET'])
+def get_smtp_settings():
+    saved_password = get_app_setting("smtp_app_password", "")
+    return jsonify({
+        "smtp_sender": get_app_setting("smtp_sender_email", ""),
+        "smtp_recipient": get_app_setting("smtp_recipient", ""),
+        "smtp_password_set": bool(saved_password),
+        "smtp_password_masked": ("*" * 8) if saved_password else "",
+    })
+
+
+@app.route('/api/settings/smtp', methods=['POST'])
+def update_smtp_settings():
+    data = request.json or {}
+    smtp_sender = (data.get('smtp_sender') or '').strip()
+    smtp_app_password = data.get('smtp_app_password') or ''
+    smtp_recipient = (data.get('smtp_recipient') or '').strip()
+
+    set_app_setting("smtp_sender_email", smtp_sender)
+    if smtp_app_password:
+        set_app_setting("smtp_app_password", smtp_app_password)
+    if smtp_recipient:
+        set_app_setting("smtp_recipient", smtp_recipient)
+
+    return jsonify({"status": "ok"})
 
 @app.route('/login/2fa', methods=['POST'])
 def login_2fa():
@@ -166,7 +197,7 @@ def login_2fa():
     email = data.get('email')
     code = data.get('code')
     
-    conn = sqlite3.connect('violations.db')
+    conn = _connect_db()
     user = conn.execute("SELECT name, email, role, created_at, two_factor_secret FROM users WHERE email = ? AND two_factor_enabled = 1", (email,)).fetchone()
     conn.close()
     
@@ -233,7 +264,7 @@ def verify_2fa():
         return jsonify({"status": "error", "message": "Missing credentials"}), 400
         
     if verify_totp_token(secret, code):
-        conn = sqlite3.connect('violations.db')
+        conn = _connect_db()
         conn.execute("UPDATE users SET two_factor_enabled = 1, two_factor_secret = ? WHERE email = ?", (secret, email))
         conn.commit()
         conn.close()
@@ -247,7 +278,7 @@ def disable_2fa():
     data = request.json or {}
     email = data.get('email')
     
-    conn = sqlite3.connect('violations.db')
+    conn = _connect_db()
     conn.execute("UPDATE users SET two_factor_enabled = 0, two_factor_secret = NULL WHERE email = ?", (email,))
     conn.commit()
     conn.close()
@@ -257,7 +288,7 @@ def disable_2fa():
 @app.route('/api/users/update', methods=['POST'])
 def update_user():
     data = request.json
-    conn = sqlite3.connect('violations.db')
+    conn = _connect_db()
     if data.get('password'):
         hashed = generate_password_hash(data['password'])
         conn.execute("UPDATE users SET name = ?, password = ? WHERE email = ?", (data['name'], hashed, data['email']))
@@ -272,7 +303,7 @@ def update_user():
 
 @app.route('/api/users', methods=['GET'])
 def get_users():
-    conn = sqlite3.connect('violations.db')
+    conn = _connect_db()
     users = conn.execute("SELECT id, name, email, role, created_at FROM users ORDER BY id ASC").fetchall()
     result = []
     for u in users:
@@ -302,7 +333,7 @@ def get_users():
 @app.route('/api/users/<int:uid>/report', methods=['GET'])
 def user_report(uid):
     import io, csv
-    conn = sqlite3.connect('violations.db')
+    conn = _connect_db()
     user = conn.execute(
         "SELECT id, name, email, role, created_at FROM users WHERE id = ?", (uid,)
     ).fetchone()
@@ -356,7 +387,7 @@ def user_report(uid):
 @app.route('/api/users/toggle_role', methods=['POST'])
 def toggle_role():
     uid = request.json.get('id')
-    conn = sqlite3.connect('violations.db')
+    conn = _connect_db()
     user = conn.execute("SELECT role, email FROM users WHERE id = ?", (uid,)).fetchone()
     if not user:
         conn.close()
@@ -375,7 +406,7 @@ def toggle_role():
 @app.route('/api/users/delete', methods=['POST'])
 def delete_user():
     uid = request.json.get('id')
-    conn = sqlite3.connect('violations.db')
+    conn = _connect_db()
     conn.execute("DELETE FROM users WHERE id = ?", (uid,))
     conn.commit()
     conn.close()
@@ -387,7 +418,7 @@ def delete_user():
 @app.route('/api/violations', methods=['GET'])
 def api_violations():
     limit = request.args.get('limit', 500, type=int)
-    conn = sqlite3.connect('violations.db')
+    conn = _connect_db()
     rows = conn.execute(
         "SELECT id, timestamp, image_path, person_name, location, detected_type FROM violations ORDER BY id DESC LIMIT ?",
         (limit,)
@@ -405,7 +436,7 @@ def api_violations():
 
 @app.route('/api/violations/<int:vid>/delete', methods=['POST'])
 def delete_violation(vid):
-    conn = sqlite3.connect('violations.db')
+    conn = _connect_db()
     conn.execute("DELETE FROM violations WHERE id = ?", (vid,))
     conn.commit()
     conn.close()
@@ -414,7 +445,7 @@ def delete_violation(vid):
 
 @app.route('/api/violations/stats', methods=['GET'])
 def api_stats():
-    conn = sqlite3.connect('violations.db')
+    conn = _connect_db()
 
     total = conn.execute("SELECT COUNT(*) FROM violations").fetchone()[0]
 
@@ -466,7 +497,7 @@ def api_stats():
 
 @app.route('/api/violations/clear', methods=['POST'])
 def api_clear():
-    conn = sqlite3.connect('violations.db')
+    conn = _connect_db()
     conn.execute("DELETE FROM violations")
     conn.commit()
     conn.close()
@@ -492,6 +523,35 @@ def api_det_stop():
 @app.route('/api/detection/status', methods=['GET'])
 def api_det_status():
     return jsonify({'running': det.is_running()})
+
+
+@app.route('/api/detection/settings', methods=['GET'])
+def api_det_settings_get():
+    """Return current detection settings so the frontend can sync on load."""
+    return jsonify(det.get_detection_settings())
+
+
+@app.route('/api/detection/settings', methods=['POST'])
+def api_det_settings_post():
+    """Update detection settings (enabled classes and/or confidence threshold)."""
+    data = request.json or {}
+    enabled_classes = data.get('enabled_classes')   # e.g. {"cigarette": true, "smoke": false, "vape": true}
+    conf_thresh = data.get('conf_thresh')            # integer 30-99, or None to use defaults
+    email_alerts = data.get('email_alerts')
+    alert_cooldown = data.get('alert_cooldown')
+    det.update_detection_settings(
+        enabled_classes=enabled_classes,
+        conf_thresh=conf_thresh,
+        email_alerts=email_alerts,
+        alert_cooldown=alert_cooldown,
+    )
+    return jsonify({'status': 'ok', 'settings': det.get_detection_settings()})
+
+
+@app.route('/api/detection/logs', methods=['GET'])
+def api_det_logs():
+    limit = request.args.get('limit', 50, type=int)
+    return jsonify(det.get_recent_logs(limit=limit))
 
 
 @app.route('/api/detection/video_feed/<int:camera_id>')
@@ -566,7 +626,7 @@ def active_streams():
     now = datetime.datetime.now()
     active = []
     for name, t in list(_user_latest_time.items()):
-        if (now - t).total_seconds() < 10.0:  # Active if frame received in last 10s
+        if (now - t).total_seconds() < 30.0:  # Keep stream active window wider for stability
             active.append(name)
     return jsonify(active)
 
@@ -603,4 +663,4 @@ def serve_image(filename):
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    app.run(debug=FLASK_DEBUG, port=API_PORT)
