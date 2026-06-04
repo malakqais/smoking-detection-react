@@ -1,6 +1,13 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { NavLink, Link, useNavigate } from 'react-router-dom';
 import logo from '../assets/LOGO.png';
+import { apiFetch } from '../utils/api.js';
+import { isStaff, normalizeRole } from '../utils/roles.js';
+import { useCurrentUser } from '../hooks/useCurrentUser.js';
+import AppSidebar from '../components/layout/AppSidebar.jsx';
+import { clearNonAuthLocalStorage } from '../utils/authStorage.js';
+import DisputeReportModal from '../components/disputes/DisputeReportModal.jsx';
+import { UserDisputesPanel } from '../components/disputes/DisputesReviewPanel.jsx';
 
 const AVATAR_COLORS = ["#ef4444", "#3b82f6", "#10b981", "#f59e0b", "#8b5cf6", "#ec4899"];
 
@@ -9,7 +16,7 @@ const Profile = () => {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('sidebarCollapsed') === 'true');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'dark');
-  const [user, setUser] = useState(() => JSON.parse(localStorage.getItem('user') || '{"name":"User","role":"user","email":"user@example.com"}'));
+  const { user, setUser } = useCurrentUser();
   const [profilePic, setProfilePic] = useState(() => localStorage.getItem('profilePic') || null);
 
   const [fullName, setFullName] = useState(user.name || '');
@@ -25,6 +32,8 @@ const Profile = () => {
   // For regular users — their violation tickets
   const [myTickets, setMyTickets] = useState([]);
   const [ticketsLoading, setTicketsLoading] = useState(false);
+  const [myDisputes, setMyDisputes] = useState([]);
+  const [disputeViolation, setDisputeViolation] = useState(null);
 
   // For admins — system overview
   const [sysStats, setSysStats] = useState(null);
@@ -35,7 +44,7 @@ const Profile = () => {
   const [confirmMessage, setConfirmMessage] = useState("");
   const [confirmCallback, setConfirmCallback] = useState(null);
 
-  const isAdmin = user.role === 'admin';
+  const isAdmin = isStaff(user);
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
@@ -51,6 +60,11 @@ const Profile = () => {
     return () => clearInterval(t);
   }, [loginTime]);
 
+  const showToast = (msg, ok = true) => {
+    setToast({ show: true, msg, ok });
+    setTimeout(() => setToast({ show: false, msg: '', ok: true }), 3000);
+  };
+
   // Fetch data based on role
   useEffect(() => {
     if (isAdmin) {
@@ -58,9 +72,12 @@ const Profile = () => {
       fetch('/api/detection/status').then(r => r.ok ? r.json() : null).then(d => d && setDetectionRunning(d.running));
     } else {
       setTicketsLoading(true);
-      fetch('/api/violations?limit=500')
-        .then(r => r.ok ? r.json() : [])
-        .then(data => {
+      Promise.all([
+        apiFetch('/api/violations?limit=500').then((r) => (r.ok ? r.json() : [])),
+        apiFetch('/api/disputes').then((r) => (r.ok ? r.json() : [])),
+      ])
+        .then(([data, disputes]) => {
+          setMyDisputes(disputes);
           const nameMatch = data.filter(v =>
             v.name && v.name.toLowerCase() === user.name.toLowerCase()
           );
@@ -71,9 +88,32 @@ const Profile = () => {
     }
   }, [isAdmin, user.name]);
 
-  const showToast = (msg, ok = true) => {
-    setToast({ show: true, msg, ok });
-    setTimeout(() => setToast({ show: false, msg: '', ok: true }), 3000);
+  const disputeForViolation = (violationId) =>
+    myDisputes.find((d) => d.violation_id === violationId);
+
+  const disputeStatusTag = (status) => {
+    const map = {
+      pending_manager: { cls: 'a', text: 'Manager reviewing' },
+      pending_admin: { cls: 'p', text: 'Admins voting' },
+      awaiting_supervisor: { cls: 'p', text: 'Supervisor deciding' },
+      approved: { cls: 'g', text: 'Mistake confirmed' },
+      rejected: { cls: 'r', text: 'Dispute rejected' },
+    };
+    return map[status] || { cls: 'b', text: status };
+  };
+
+  const refreshTickets = () => {
+    if (isAdmin) return;
+    setTicketsLoading(true);
+    Promise.all([
+      apiFetch('/api/violations?limit=500').then((r) => (r.ok ? r.json() : [])),
+      apiFetch('/api/disputes').then((r) => (r.ok ? r.json() : [])),
+    ])
+      .then(([data, disputes]) => {
+        setMyDisputes(disputes);
+        setMyTickets(data.filter((v) => v.name?.toLowerCase() === user.name?.toLowerCase()));
+      })
+      .finally(() => setTicketsLoading(false));
   };
 
   const getInitials = (name) => {
@@ -131,12 +171,14 @@ const Profile = () => {
   };
 
   const clearLocalData = () => {
-    setConfirmMessage("Are you sure you want to clear all locally cached settings and appearance choices? Your credentials will remain intact.");
+    setConfirmMessage(
+      'Clear all locally cached settings (theme, detection prefs, profile photo cache, etc.)? Your login session and account will stay active.',
+    );
     setConfirmCallback(() => () => {
-      const keep = { isLoggedIn: localStorage.getItem('isLoggedIn'), user: localStorage.getItem('user') };
-      localStorage.clear();
-      Object.entries(keep).forEach(([k, v]) => v && localStorage.setItem(k, v));
-      window.location.reload();
+      clearNonAuthLocalStorage();
+      setProfilePic(null);
+      showToast('Local data cleared. Reloading…');
+      setTimeout(() => window.location.reload(), 400);
     });
     setShowConfirmModal(true);
   };
@@ -156,29 +198,16 @@ const Profile = () => {
     <div className="layout">
       <div className={`sb-overlay ${sidebarOpen ? 'visible' : ''}`} onClick={() => setSidebarOpen(false)}></div>
 
-      <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''} ${sidebarOpen ? 'open' : ''}`}>
-        <div className="sb-logo">
-          <img src={logo} alt="Logo" />
-          <div>
-            <div className="sb-logo-name">SmokeDet System</div>
-            <div className="sb-logo-sub">{user.name} ({user.role})</div>
-          </div>
-          <button className="sb-collapse-btn" onClick={() => { const s = !sidebarCollapsed; setSidebarCollapsed(s); localStorage.setItem('sidebarCollapsed', s); }}>
-            <i className={`fa-solid ${sidebarCollapsed ? 'fa-chevron-right' : 'fa-chevron-left'}`}></i>
-          </button>
-        </div>
-        <nav className="sb-nav">
-          <div className="sb-section">Main</div>
-          <NavLink className="sb-item" to="/"><i className="fa-solid fa-gauge-high"></i><span className="sb-label">Dashboard</span></NavLink>
-          <NavLink className="sb-item" to="/analytics"><i className="fa-solid fa-chart-pie"></i><span className="sb-label">Analytics</span></NavLink>
-          {isAdmin && <NavLink className="sb-item" to="/admin"><i className="fa-solid fa-user-shield"></i><span className="sb-label">Admin Panel</span></NavLink>}
-          <div className="sb-section">Account</div>
-          <NavLink className="sb-item" to="/profile"><i className="fa-solid fa-circle-user"></i><span className="sb-label">Profile</span></NavLink>
-          <NavLink className="sb-item" to="/settings"><i className="fa-solid fa-sliders"></i><span className="sb-label">Settings</span></NavLink>
-          <div className="sb-section">System</div>
-          <NavLink className="sb-item" to="/logout"><i className="fa-solid fa-right-from-bracket"></i><span className="sb-label">Logout</span></NavLink>
-        </nav>
-      </aside>
+      <AppSidebar
+        user={user}
+        collapsed={sidebarCollapsed}
+        open={sidebarOpen}
+        onToggleCollapse={() => {
+          const s = !sidebarCollapsed;
+          setSidebarCollapsed(s);
+          localStorage.setItem('sidebarCollapsed', s);
+        }}
+      />
 
       <main className="main">
         <header className="top-bar">
@@ -186,7 +215,7 @@ const Profile = () => {
             <div className="ib d-lg-none" onClick={() => setSidebarOpen(true)}><i className="fa-solid fa-bars"></i></div>
             <div>
               <div className="pg-title">Profile</div>
-              <div className="pg-sub">{isAdmin ? 'Administrator account' : 'Your account & violation tickets'}</div>
+              <div className="pg-sub">{isAdmin ? 'Staff account — manager tools enabled' : 'Your account & violation tickets'}</div>
             </div>
           </div>
           <div className="tb-right">
@@ -380,6 +409,20 @@ const Profile = () => {
                 </div>
               )}
 
+              {!isAdmin && (
+                <div className="c mb-4">
+                  <div className="c-head">
+                    <div>
+                      <div className="c-title"><i className="fa-solid fa-scale-balanced me-2" style={{ color: 'var(--amber)' }}></i>My dispute requests</div>
+                      <div className="c-sub">Track mistaken-violation reports through manager → admins → supervisor</div>
+                    </div>
+                  </div>
+                  <div className="c-body">
+                    <UserDisputesPanel disputes={myDisputes} loading={ticketsLoading} />
+                  </div>
+                </div>
+              )}
+
               {/* ── USER: My Violation Tickets ── */}
               {!isAdmin && (
                 <div className="c">
@@ -405,7 +448,11 @@ const Profile = () => {
                       </div>
                     ) : (
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                        {myTickets.slice(0, 10).map(v => (
+                        {myTickets.slice(0, 10).map(v => {
+                          const dispute = disputeForViolation(v.id);
+                          const openDispute = dispute && !['approved', 'rejected'].includes(dispute.status);
+                          const st = dispute ? disputeStatusTag(dispute.status) : null;
+                          return (
                           <div key={v.id} className="ticket-row">
                             <div className="ticket-icon">
                               <i className="fa-solid fa-triangle-exclamation"></i>
@@ -420,9 +467,23 @@ const Profile = () => {
                             {v.image && (
                               <img src={v.image} className="ticket-thumb" alt="Evidence" onError={e => e.target.style.display='none'} />
                             )}
-                            <span className="tag r ticket-tag">Issued</span>
+                            {st ? (
+                              <span className={`tag ${st.cls} ticket-tag`}>{st.text}</span>
+                            ) : (
+                              <button
+                                type="button"
+                                className="btn-ghost btn-sm"
+                                onClick={() => setDisputeViolation(v)}
+                              >
+                                <i className="fa-solid fa-flag me-1"></i>Report mistake
+                              </button>
+                            )}
+                            {openDispute && (
+                              <span className="tag a ticket-tag" style={{ marginLeft: 6 }}>In review</span>
+                            )}
                           </div>
-                        ))}
+                          );
+                        })}
                         {myTickets.length > 10 && (
                           <div style={{ textAlign: 'center', color: 'var(--tx3)', fontSize: '12.5px', padding: '6px 0' }}>
                             + {myTickets.length - 10} more tickets
@@ -479,13 +540,13 @@ const Profile = () => {
                   <div className="danger-zone">
                     <div className="danger-zone-title"><i className="fa-solid fa-broom me-2"></i>Clear All Local Data</div>
                     <div className="danger-zone-desc">Removes all locally stored data. Your account credentials are preserved.</div>
-                    <button className="btn-danger-outline" onClick={clearLocalData}><i className="fa-solid fa-broom me-1"></i>Clear Data</button>
+                    <button type="button" className="btn-danger-outline" onClick={clearLocalData}><i className="fa-solid fa-broom me-1"></i>Clear Data</button>
                   </div>
                   {isAdmin && (
                     <div className="danger-zone">
                       <div className="danger-zone-title"><i className="fa-solid fa-user-xmark me-2"></i>Delete Account</div>
                       <div className="danger-zone-desc">Permanently removes your admin account. This action cannot be undone.</div>
-                      <button className="btn-danger-outline" onClick={deleteAccount}><i className="fa-solid fa-xmark me-1"></i>Delete Account</button>
+                      <button type="button" className="btn-danger-outline" onClick={deleteAccount}><i className="fa-solid fa-xmark me-1"></i>Delete Account</button>
                     </div>
                   )}
                 </div>
@@ -560,6 +621,15 @@ const Profile = () => {
           </div>
         </div>
       )}
+
+      <DisputeReportModal
+        violation={disputeViolation}
+        onClose={() => setDisputeViolation(null)}
+        onSubmitted={() => {
+          showToast('Dispute submitted — admins will review');
+          refreshTickets();
+        }}
+      />
     </div>
   );
 };

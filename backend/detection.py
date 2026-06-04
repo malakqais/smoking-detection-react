@@ -3,9 +3,10 @@ import threading
 import datetime
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 import cv2
 from ultralytics import YOLO
-from database import insert_violation, get_user_email, get_app_setting
+from database import insert_violation, get_user_email, get_app_setting, get_user_id_by_label
 from email_service import send_violation_email
 from config import (
     ALERT_COOLDOWN_SECONDS,
@@ -16,6 +17,9 @@ from config import (
     TOBACCO_CONF_THRESHOLD,
     SMOKE_CONF_THRESHOLD,
     SMOKE_ONLY_VIOLATION_CONF,
+    STREAM_JPEG_QUALITY,
+    CAMERA_DETECT_EVERY_N,
+    USER_DETECT_WORKERS,
 )
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -26,8 +30,17 @@ _threads = []
 _stop_event = threading.Event()
 _models = {}
 _latest_frames = {}
+_latest_frame_seq = {}
 _recent_logs = deque(maxlen=300)
 _logs_lock = threading.Lock()
+
+# User webcam streams — raw preview is updated immediately; AI runs async
+_user_raw_frames = {}
+_user_frame_seq = {}
+_user_latest_time = {}
+_user_frame_lock = threading.Lock()
+_user_frame_pending = {}
+_user_detect_executor = ThreadPoolExecutor(max_workers=USER_DETECT_WORKERS, thread_name_prefix='webcam-det')
 
 # Runtime-configurable settings (updated via API)
 _detection_settings = {
@@ -91,13 +104,49 @@ def _load_models():
     global _models
     if _models:
         return
-    _models = {
-        'person':    YOLO(os.path.join(BASE_DIR, "VIRSION 1", "yolov8n.pt")),
-        'cigarette': YOLO(os.path.join(MODEL_DIR, "cigarette_best1.pt")),
-        'smoke':     YOLO(os.path.join(MODEL_DIR, "smoke_best.pt")),
-        'vape':      YOLO(os.path.join(MODEL_DIR, "vape_best.pt")),
-        'face':      YOLO(os.path.join(MODEL_DIR, "face_best.pt")),
+    from gpu_runtime import device_for_model, gpu_status, use_fp16, warmup_model
+
+    paths = {
+        'person':    os.path.join(BASE_DIR, "VIRSION 1", "yolov8n.pt"),
+        'cigarette': os.path.join(MODEL_DIR, "cigarette_best1.pt"),
+        'smoke':     os.path.join(MODEL_DIR, "smoke_best.pt"),
+        'vape':      os.path.join(MODEL_DIR, "vape_best.pt"),
+        'face':      os.path.join(MODEL_DIR, "face_best.pt"),
     }
+    _models = {}
+    for key, path in paths.items():
+        dev = device_for_model(key)
+        model = YOLO(path)
+        if dev != 'cpu':
+            try:
+                model.to(dev)
+            except Exception as exc:
+                print(f"[GPU] Could not move {key} to {dev}: {exc}")
+                dev = 'cpu'
+        _models[key] = model
+        warmup_model(model, dev)
+        print(f"[GPU] Loaded {key} on {dev}")
+
+    info = gpu_status()
+    mode = info.get('mode', 'cpu')
+    if mode == 'gpu_farm':
+        _log_event(f"GPU farm active — {info['gpu_count']} GPU(s), map={info['model_device_map']}")
+    elif mode == 'gpu':
+        _log_event(f"GPU inference on {info['primary_device']} (FP16={info['fp16_enabled']})")
+    else:
+        _log_event("Running on CPU — install CUDA PyTorch for GPU acceleration")
+
+
+def _predict(model_key, source, **kwargs):
+    """Run YOLO on the GPU assigned to this model (multi-GPU farm when configured)."""
+    from gpu_runtime import device_for_model, use_fp16
+    if model_key not in _models:
+        _load_models()
+    dev = device_for_model(model_key)
+    opts = dict(kwargs, device=dev, verbose=False)
+    if use_fp16() and dev.startswith('cuda'):
+        opts['half'] = True
+    return _models[model_key].predict(source, **opts)
 
 
 CONF_THRESHOLD = 0.55   # optimized threshold for targeted crops
@@ -141,7 +190,7 @@ def _is_candidate_size_valid(cls_name, rel_h, rel_w):
 
 
 def _iter_person_boxes(frame):
-    person_results = _models['person'](frame, classes=[0], conf=PERSON_CONF_THRESHOLD, verbose=False)
+    person_results = _predict('person', frame, classes=[0], conf=PERSON_CONF_THRESHOLD)
     boxes = []
     for pr in person_results:
         for pbox in pr.boxes:
@@ -175,11 +224,11 @@ def _collect_candidates(crop):
             continue
 
         current_threshold = _class_threshold(cls_name, override_thresh)
-        results = _models[cls_name](
+        results = _predict(
+            cls_name,
             crop,
             conf=_yolo_infer_conf(cls_name),
             imgsz=640,
-            verbose=False,
         )
         crop_h, crop_w, _ = crop.shape
 
@@ -396,16 +445,21 @@ class CameraStream:
         while not self.stopped:
             self.ret, self.frame = self.stream.read()
             if self.ret and self.frame is not None:
-                annotated = self.frame.copy()
                 with self.lock:
                     cmds = list(self.draw_commands)
-                for cmd in cmds:
-                    if cmd[0] == 'rect':
-                        cv2.rectangle(annotated, cmd[1], cmd[2], cmd[3], cmd[4])
-                    elif cmd[0] == 'text':
-                        cv2.putText(annotated, cmd[1], cmd[2], cv2.FONT_HERSHEY_SIMPLEX, cmd[3], cmd[4], cmd[5])
-                _latest_frames[self.camera_index] = annotated
-            time.sleep(0.01)
+                if cmds:
+                    annotated = self.frame.copy()
+                    for cmd in cmds:
+                        if cmd[0] == 'rect':
+                            cv2.rectangle(annotated, cmd[1], cmd[2], cmd[3], cmd[4])
+                        elif cmd[0] == 'text':
+                            cv2.putText(annotated, cmd[1], cmd[2], cv2.FONT_HERSHEY_SIMPLEX, cmd[3], cmd[4], cmd[5])
+                    display = annotated
+                else:
+                    display = self.frame
+                _latest_frames[self.camera_index] = display
+                _latest_frame_seq[self.camera_index] = _latest_frame_seq.get(self.camera_index, 0) + 1
+            time.sleep(0.001)
 
     def read(self):
         return self.ret, self.frame
@@ -432,10 +486,15 @@ def _detection_loop(camera_index, location):
     print(f"[Detection] Started on camera {camera_index} — location: {location}")
     _log_event(f"Camera {camera_index} started at {location}")
 
+    frame_idx = 0
     while not _stop_event.is_set():
         ret, frame = cam.read()
         if not ret or frame is None:
-            time.sleep(0.01)
+            time.sleep(0.001)
+            continue
+
+        frame_idx += 1
+        if frame_idx % CAMERA_DETECT_EVERY_N != 0:
             continue
 
         _load_models()
@@ -485,7 +544,7 @@ def _detection_loop(camera_index, location):
         rel_path = f"static/images/{img_filename}"
 
         person_name = "Unknown"
-        face_results = _models['face'](frame, conf=0.55, verbose=False)
+        face_results = _predict('face', frame, conf=0.55)
         for r in face_results:
             if len(r.boxes) > 0:
                 person_name = "Person Detected"
@@ -561,7 +620,11 @@ def process_user_frame(frame, username, location="Student Webcam"):
             rel_path = f"static/images/{img_filename}"
             
             log_type = (violation_summary or detected_cls or 'unknown').lower()
-            insert_violation(timestamp, rel_path, username, location, detected_type=log_type)
+            uid = get_user_id_by_label(username)
+            insert_violation(
+                timestamp, rel_path, username, location,
+                detected_type=log_type, user_id=uid,
+            )
             print(f"[AI Multi-Stream] VIOLATION LOGGED: user {username} caught with {detected_cls} on webcam")
             _log_event(f"Webcam violation: {username} with {detected_cls} at {location}", "warn")
             
@@ -575,12 +638,85 @@ def process_user_frame(frame, username, location="Student Webcam"):
     return annotated_frame, detected_cls is not None
 
 
+def publish_user_stream_frame(username, frame):
+    """Update live preview immediately (no YOLO on this path)."""
+    with _user_frame_lock:
+        _user_raw_frames[username] = frame
+        _user_frame_seq[username] = _user_frame_seq.get(username, 0) + 1
+        _user_latest_time[username] = datetime.datetime.now()
+
+
+def _drain_user_detection(username):
+    while True:
+        with _user_frame_lock:
+            pending = _user_frame_pending.pop(username, None)
+        if pending is None:
+            return
+        frame, location = pending
+        try:
+            process_user_frame(frame, username, location)
+        except Exception as exc:
+            print(f"[Webcam] Detection error for {username}: {exc}")
+
+
+def queue_user_stream_detection(username, frame, location="Student Webcam"):
+    """Run YOLO on a copy in the background; always keeps only the newest pending frame."""
+    with _user_frame_lock:
+        _user_frame_pending[username] = (frame.copy(), location)
+    _user_detect_executor.submit(_drain_user_detection, username)
+
+
+def get_user_stream_frame(username):
+    with _user_frame_lock:
+        return _user_raw_frames.get(username)
+
+
+def get_user_stream_seq(username):
+    with _user_frame_lock:
+        return _user_frame_seq.get(username, 0)
+
+
+def list_active_user_streams(max_age_seconds=30.0):
+    now = datetime.datetime.now()
+    active = []
+    with _user_frame_lock:
+        for name, t in list(_user_latest_time.items()):
+            if (now - t).total_seconds() < max_age_seconds:
+                active.append(name)
+    return active
+
+
+def encode_stream_jpeg(frame, quality=None):
+    q = STREAM_JPEG_QUALITY if quality is None else quality
+    ok, buf = cv2.imencode(
+        '.jpg',
+        frame,
+        [int(cv2.IMWRITE_JPEG_QUALITY), int(q), int(cv2.IMWRITE_JPEG_OPTIMIZE), 1],
+    )
+    return buf.tobytes() if ok else None
+
+
 _detection_active = False
 
 def start_detection(cameras=None):
     global _detection_active
+    if _detection_active:
+        return False
     _detection_active = True
-    print("[AI Surveillance] Detection mode activated globally. Listening for client webcam streams...")
+    _stop_event.clear()
+    if cameras:
+        for cam in cameras:
+            idx = cam.get('index', 0)
+            loc = cam.get('location') or f'Camera {idx}'
+            t = threading.Thread(
+                target=_detection_loop,
+                args=(idx, loc),
+                daemon=True,
+                name=f'det-cam-{idx}',
+            )
+            t.start()
+            _threads.append(t)
+    print("[AI Surveillance] Detection mode activated. Live preview decoupled from inference.")
     _log_event("Detection mode activated")
     return True
 
@@ -588,8 +724,23 @@ def start_detection(cameras=None):
 def stop_detection():
     global _detection_active
     _detection_active = False
+    _stop_event.set()
+    for t in list(_threads):
+        t.join(timeout=2.0)
+    _threads.clear()
+    _stop_event.clear()
+    with _user_frame_lock:
+        _user_raw_frames.clear()
+        _user_frame_seq.clear()
+        _user_latest_time.clear()
+        _user_frame_pending.clear()
     print("[AI Surveillance] Detection mode deactivated.")
     _log_event("Detection mode deactivated")
+
+
+def get_gpu_status():
+    from gpu_runtime import gpu_status
+    return gpu_status()
 
 
 def is_running():
@@ -599,6 +750,10 @@ def is_running():
 
 def get_latest_frame(camera_index):
     return _latest_frames.get(camera_index, None)
+
+
+def get_latest_frame_seq(camera_index):
+    return _latest_frame_seq.get(camera_index, 0)
 
 
 if __name__ == "__main__":

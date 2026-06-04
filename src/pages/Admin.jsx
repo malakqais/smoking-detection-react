@@ -1,12 +1,21 @@
 import React, { useState, useEffect } from 'react';
 import { NavLink } from 'react-router-dom';
 import logo from '../assets/LOGO.png';
+import { apiFetch } from '../utils/api.js';
+import { Link } from 'react-router-dom';
+import { isAdmin, isManager, isSupervisor, ROLE_LABELS, normalizeRole, staffPanelLabel, canExportReports, canSuspendUsers, canViewAudit } from '../utils/roles.js';
+import { useCurrentUser } from '../hooks/useCurrentUser.js';
+import AppSidebar from '../components/layout/AppSidebar.jsx';
+import { downloadAuthenticated } from '../utils/download.js';
+import DisputesReviewPanel from '../components/disputes/DisputesReviewPanel.jsx';
 
-const ADMIN_DOMAIN = '@smoker.jr';
-
-const avatarColor = (role) => role === 'admin'
-  ? 'linear-gradient(135deg,#ef4444,#f97316)'
-  : 'linear-gradient(135deg,#3b82f6,#8b5cf6)';
+const avatarColor = (role) => {
+  const r = normalizeRole(role);
+  if (r === 'supervisor') return 'linear-gradient(135deg,#ef4444,#f97316)';
+  if (r === 'admin') return 'linear-gradient(135deg,#0ea5e9,#6366f1)';
+  if (r === 'manager') return 'linear-gradient(135deg,#8b5cf6,#6366f1)';
+  return 'linear-gradient(135deg,#3b82f6,#22d3ee)';
+};
 
 const initials = (name = '') =>
   name.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2) || '?';
@@ -21,20 +30,23 @@ const Admin = () => {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('sidebarCollapsed') === 'true');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'dark');
-  const [user] = useState(() => JSON.parse(localStorage.getItem('user') || '{"name":"Admin","role":"admin","email":"admin@smoker.jr"}'));
+  const { user } = useCurrentUser();
   const [users, setUsers] = useState([]);
+  const [auditLogs, setAuditLogs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState(null);
   const [search, setSearch] = useState('');
   const [roleFilter, setRoleFilter] = useState('all');
+  const [tab, setTab] = useState('users');
   const [toast, setToast] = useState({ show: false, msg: '', ok: true });
-  const [confirmDelete, setConfirmDelete] = useState(null);
+  const [confirmSuspend, setConfirmSuspend] = useState(null);
+  const [suspendTotp, setSuspendTotp] = useState('');
 
   const fetchUsers = async () => {
     setFetchError(null);
     setLoading(true);
     try {
-      const res = await fetch('/api/users');
+      const res = await apiFetch('/api/users');
       if (res.ok) {
         const data = await res.json();
         setUsers(data);
@@ -48,7 +60,14 @@ const Admin = () => {
     }
   };
 
-  useEffect(() => { fetchUsers(); }, []);
+  const fetchAudit = async () => {
+    try {
+      const res = await apiFetch('/api/audit/logs?limit=80');
+      if (res.ok) setAuditLogs(await res.json());
+    } catch { /* ignore */ }
+  };
+
+  useEffect(() => { fetchUsers(); if (canViewAudit(user)) fetchAudit(); }, []);
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('theme', theme);
@@ -59,28 +78,70 @@ const Admin = () => {
     setTimeout(() => setToast({ show: false, msg: '', ok: true }), 3000);
   };
 
-  const handleDelete = async (u) => {
+  const downloadUserReport = async (uid, name) => {
     try {
-      const res = await fetch('/api/users/delete', {
+      await downloadAuthenticated(
+        `/api/users/${uid}/report`,
+        `SmokeDet_User_Report_${(name || 'user').replace(/\s+/g, '_')}.xlsx`,
+      );
+      showToast('Excel report downloaded');
+    } catch (e) {
+      showToast(e.message || 'Download failed', false);
+    }
+  };
+
+  const downloadPlatformReport = async () => {
+    try {
+      await downloadAuthenticated(
+        '/api/reports/platform',
+        `SmokeDet_Platform_Report_${new Date().toISOString().slice(0, 10)}.xlsx`,
+      );
+      showToast('Platform Excel report downloaded');
+    } catch (e) {
+      showToast(e.message || 'Download failed', false);
+    }
+  };
+
+  const handleSuspend = async (u, reason, totp_code) => {
+    try {
+      const res = await apiFetch('/api/users/suspend', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: u.id }),
+        body: JSON.stringify({ id: u.id, reason, totp_code }),
       });
-      if (res.ok) { fetchUsers(); showToast(`${u.name} deleted`); }
-      else showToast('Delete failed', false);
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) { fetchUsers(); fetchAudit(); showToast(data.message || `${u.name} suspended`); }
+      else showToast(data.message || 'Suspend failed', false);
     } catch { showToast('Network error', false); }
-    setConfirmDelete(null);
+    setConfirmSuspend(null);
+    setSuspendTotp('');
+  };
+
+  const handleReactivate = async (u) => {
+    const code = !isSupervisor(user) ? suspendTotp || window.prompt('Manager 2FA code:') : undefined;
+    try {
+      const res = await apiFetch('/api/users/reactivate', {
+        method: 'POST',
+        body: JSON.stringify({ id: u.id, totp_code: code }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) { fetchUsers(); fetchAudit(); showToast(data.message || `${u.name} reactivated`); }
+      else showToast(data.message || 'Failed', false);
+    } catch { showToast('Network error', false); }
   };
 
   const filtered = users.filter(u => {
     const q = search.toLowerCase();
     const matchQ = !q || u.name?.toLowerCase().includes(q) || u.email?.toLowerCase().includes(q) || String(u.id).includes(q);
-    const matchR = roleFilter === 'all' || u.role === roleFilter;
+    const matchR = roleFilter === 'all'
+      || (roleFilter === 'suspended' ? u.status === 'suspended' : normalizeRole(u.role) === roleFilter);
     return matchQ && matchR;
   });
 
-  const admins = users.filter(u => u.role === 'admin').length;
-  const regular = users.filter(u => u.role === 'user').length;
+  const supervisors = users.filter(u => normalizeRole(u.role) === 'supervisor').length;
+  const managers = users.filter(u => normalizeRole(u.role) === 'manager').length;
+  const admins = users.filter(u => normalizeRole(u.role) === 'admin').length;
+  const regular = users.filter(u => normalizeRole(u.role) === 'user').length;
+  const suspended = users.filter(u => u.status === 'suspended').length;
   const totalViolations = users.reduce((s, u) => s + (u.violation_count || 0), 0);
   const mostOffender = users.reduce((a, b) => (b.violation_count || 0) > (a.violation_count || 0) ? b : a, users[0] || {});
   const isDark = theme === 'dark';
@@ -89,44 +150,43 @@ const Admin = () => {
     <div className="layout">
       <div className={`sb-overlay ${sidebarOpen ? 'visible' : ''}`} onClick={() => setSidebarOpen(false)}></div>
 
-      <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''} ${sidebarOpen ? 'open' : ''}`}>
-        <div className="sb-logo">
-          <img src={logo} alt="Logo" />
-          <div>
-            <div className="sb-logo-name">SmokeDet System</div>
-            <div className="sb-logo-sub">{user.name} ({user.role})</div>
-          </div>
-          <button className="sb-collapse-btn" onClick={() => { const s = !sidebarCollapsed; setSidebarCollapsed(s); localStorage.setItem('sidebarCollapsed', s); }}>
-            <i className={`fa-solid ${sidebarCollapsed ? 'fa-chevron-right' : 'fa-chevron-left'}`}></i>
-          </button>
-        </div>
-        <nav className="sb-nav">
-          <div className="sb-section">Main</div>
-          <NavLink className="sb-item" to="/"><i className="fa-solid fa-gauge-high"></i><span className="sb-label">Dashboard</span></NavLink>
-          <NavLink className="sb-item" to="/analytics"><i className="fa-solid fa-chart-pie"></i><span className="sb-label">Analytics</span></NavLink>
-          <NavLink className="sb-item" to="/admin"><i className="fa-solid fa-user-shield"></i><span className="sb-label">Admin Panel</span></NavLink>
-          <div className="sb-section">Account</div>
-          <NavLink className="sb-item" to="/profile"><i className="fa-solid fa-circle-user"></i><span className="sb-label">Profile</span></NavLink>
-          <NavLink className="sb-item" to="/settings"><i className="fa-solid fa-sliders"></i><span className="sb-label">Settings</span></NavLink>
-          <div className="sb-section">System</div>
-          <NavLink className="sb-item" to="/logout"><i className="fa-solid fa-right-from-bracket"></i><span className="sb-label">Logout</span></NavLink>
-        </nav>
-      </aside>
+      <AppSidebar
+        user={user}
+        collapsed={sidebarCollapsed}
+        open={sidebarOpen}
+        onToggleCollapse={() => {
+          const s = !sidebarCollapsed;
+          setSidebarCollapsed(s);
+          localStorage.setItem('sidebarCollapsed', s);
+        }}
+      />
 
       <main className="main">
         <header className="top-bar">
           <div className="tb-left">
             <div className="ib d-lg-none" onClick={() => setSidebarOpen(true)}><i className="fa-solid fa-bars"></i></div>
             <div>
-              <div className="pg-title">Admin Panel</div>
-              <div className="pg-sub">User management &amp; access control</div>
+              <div className="pg-title">{staffPanelLabel(user)}</div>
+              <div className="pg-sub">
+                {isSupervisor(user) && 'Supervisor — full access including Supervisor Console'}
+                {isAdmin(user) && 'Admin — user management, Excel reports, dispute voting, audit log'}
+                {isManager(user) && !isAdmin(user) && !isSupervisor(user) && 'Manager — live ops, dispute first review, remove mistaken violations'}
+              </div>
             </div>
           </div>
           <div className="tb-right">
             <div className="ib" onClick={() => setTheme(isDark ? 'light' : 'dark')} title="Toggle theme">
               {isDark ? <i className="fa-solid fa-moon"></i> : <i className="fa-solid fa-sun" style={{ color: 'var(--amber)' }}></i>}
             </div>
-            <button className="btn-ghost btn-sm" onClick={fetchUsers}>
+            {isSupervisor(user) && (
+              <Link to="/supervisor" className="btn-ghost btn-sm"><i className="fa-solid fa-crown me-1"></i>Supervisor Console</Link>
+            )}
+            {canExportReports(user) && (
+              <button type="button" className="btn-ghost btn-sm" onClick={downloadPlatformReport}>
+                <i className="fa-solid fa-file-excel me-1"></i>Platform Excel
+              </button>
+            )}
+            <button type="button" className="btn-ghost btn-sm" onClick={() => { fetchUsers(); if (canViewAudit(user)) fetchAudit(); }}>
               <i className="fa-solid fa-rotate-right me-1"></i>Refresh
             </button>
           </div>
@@ -150,8 +210,17 @@ const Admin = () => {
                 <i className="fa-solid fa-user-shield"></i>
               </div>
               <div>
+                <div className="admin-stat-val">{managers}</div>
+                <div className="admin-stat-label">Managers</div>
+              </div>
+            </div>
+            <div className="admin-stat-card">
+              <div className="admin-stat-icon" style={{ background: 'rgba(14,165,233,0.12)', color: '#38bdf8' }}>
+                <i className="fa-solid fa-user-gear"></i>
+              </div>
+              <div>
                 <div className="admin-stat-val">{admins}</div>
-                <div className="admin-stat-label">Administrators</div>
+                <div className="admin-stat-label">Admins</div>
               </div>
             </div>
             <div className="admin-stat-card">
@@ -197,12 +266,15 @@ const Admin = () => {
                   <div style={{ fontSize: 11, color: 'var(--tx3)', marginTop: 3 }}>top location</div>
                 </div>
               )}
+              {canExportReports(user) && (
               <button
+                type="button"
                 className="btn-ghost btn-sm"
-                onClick={() => { const a = document.createElement('a'); a.href = `/api/users/${mostOffender.id}/report`; a.download = ''; a.click(); }}
+                onClick={() => downloadUserReport(mostOffender.id, mostOffender.name)}
               >
-                <i className="fa-solid fa-file-arrow-down me-1"></i>Export Report
+                <i className="fa-solid fa-file-excel me-1"></i>Export Excel
               </button>
+              )}
             </div>
           )}
 
@@ -216,7 +288,7 @@ const Admin = () => {
               <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
                 {/* Role filter */}
                 <div style={{ display: 'flex', gap: '6px' }}>
-                  {['all', 'admin', 'user'].map(r => (
+                  {['all', 'supervisor', 'admin', 'manager', 'user', 'suspended'].map(r => (
                     <button
                       key={r}
                       onClick={() => setRoleFilter(r)}
@@ -284,8 +356,14 @@ const Admin = () => {
                     </thead>
                     <tbody>
                       {filtered.map((u, i) => {
-                        const isAdminDomain = u.email?.endsWith(ADMIN_DOMAIN);
-                        const hasViolations = u.violation_count > 0;
+                        const roleNorm = normalizeRole(u.role);
+                        const isSup = roleNorm === 'supervisor';
+                        const isAdm = roleNorm === 'admin';
+                        const isSuspended = u.status === 'suspended';
+                        const maySuspend = canSuspendUsers(user)
+                          && u.email !== user.email
+                          && roleNorm !== 'supervisor'
+                          && (isSupervisor(user) || (roleNorm !== 'manager' && roleNorm !== 'admin'));
                         return (
                           <tr key={u.id} className="admin-user-row">
                             <td style={{ color: 'var(--tx3)', fontSize: '13px' }}>{i + 1}</td>
@@ -301,8 +379,8 @@ const Admin = () => {
                                 </div>
                                 <div>
                                   <div style={{ fontWeight: 700, color: 'var(--tx1)', fontSize: '14px' }}>{u.name}</div>
-                                  <div style={{ fontSize: '10px', color: isAdminDomain ? 'var(--red)' : 'var(--tx3)', fontWeight: 600 }}>
-                                    {isAdminDomain ? <><i className="fa-solid fa-lock me-1"></i>admin domain</> : 'standard'}
+                                  <div style={{ fontSize: '10px', color: isSuspended ? 'var(--red)' : 'var(--tx3)', fontWeight: 600 }}>
+                                    {isSuspended ? <><i className="fa-solid fa-ban me-1"></i>suspended</> : ROLE_LABELS[normalizeRole(u.role)]}
                                     {u.email === user.email && <span style={{ color: 'var(--green)', marginLeft: 6 }}>● You</span>}
                                   </div>
                                 </div>
@@ -312,9 +390,9 @@ const Admin = () => {
                               <div style={{ fontSize: '12px', color: 'var(--tx2)', fontFamily: 'monospace' }}>{u.email}</div>
                             </td>
                             <td>
-                              <span className={`tag ${u.role === 'admin' ? 'r' : 'b'}`}>
-                                <i className={`fa-solid ${u.role === 'admin' ? 'fa-shield-halved' : 'fa-user'} me-1`}></i>
-                                {u.role}
+                              <span className={`tag ${isSup ? 'r' : isAdm ? 'admin-tag' : roleNorm === 'manager' ? 'p' : 'b'}`}>
+                                <i className={`fa-solid ${isSup ? 'fa-crown' : isAdm ? 'fa-user-gear' : roleNorm === 'manager' ? 'fa-user-shield' : 'fa-user'} me-1`}></i>
+                                {ROLE_LABELS[roleNorm] || u.role}
                               </span>
                             </td>
                             <td>
@@ -356,28 +434,40 @@ const Admin = () => {
                             </td>
                             <td>
                               <div style={{ display: 'flex', gap: '6px' }}>
+                                {canExportReports(user) && (
                                 <button
                                   className="ib btn-sm"
                                   title="Export user report"
                                   style={{ color: 'var(--blue)' }}
-                                  onClick={() => {
-                                    const a = document.createElement('a');
-                                    a.href = `/api/users/${u.id}/report`;
-                                    a.download = '';
-                                    a.click();
-                                  }}
+                                  onClick={() => downloadUserReport(u.id, u.name)}
                                 >
                                   <i className="fa-solid fa-file-arrow-down"></i>
                                 </button>
-                                <button
-                                  className="ib btn-sm"
-                                  title="Delete user"
-                                  style={{ color: 'var(--red)' }}
-                                  onClick={() => setConfirmDelete(u)}
-                                  disabled={u.email === user.email}
-                                >
-                                  <i className="fa-solid fa-trash"></i>
-                                </button>
+                                )}
+                                {canSuspendUsers(user) && (
+                                <>
+                                {u.status === 'suspended' ? (
+                                  <button className="ib btn-sm" title="Reactivate" style={{ color: 'var(--green)' }} onClick={() => handleReactivate(u)}>
+                                    <i className="fa-solid fa-user-check"></i>
+                                  </button>
+                                ) : (
+                                  <button
+                                    className="ib btn-sm"
+                                    title="Suspend user"
+                                    style={{ color: 'var(--amber)' }}
+                                    onClick={() => setConfirmSuspend(u)}
+                                    disabled={!maySuspend}
+                                  >
+                                    <i className="fa-solid fa-ban"></i>
+                                  </button>
+                                )}
+                                </>
+                                )}
+                                {isSupervisor(user) && normalizeRole(u.role) === 'manager' && (
+                                  <Link to="/supervisor" className="ib btn-sm" title="Demote in Supervisor Console" style={{ color: 'var(--tx3)' }}>
+                                    <i className="fa-solid fa-crown"></i>
+                                  </Link>
+                                )}
                               </div>
                             </td>
                           </tr>
@@ -389,23 +479,47 @@ const Admin = () => {
               )}
             </div>
 
-            {/* Domain legend */}
-            <div style={{ padding: '14px 24px', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: '20px', flexWrap: 'wrap' }}>
-              <div style={{ fontSize: '12px', color: 'var(--tx3)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <i className="fa-solid fa-lock" style={{ color: 'var(--red)' }}></i>
-                <span>Accounts ending in <strong style={{ color: 'var(--tx2)' }}>{ADMIN_DOMAIN}</strong> are permanently locked to admin role</span>
-              </div>
-              <div style={{ fontSize: '12px', color: 'var(--tx3)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <i className="fa-solid fa-circle-info" style={{ color: 'var(--blue)' }}></i>
-                <span>You cannot delete your own account</span>
-              </div>
+            <div style={{ padding: '14px 24px', borderTop: '1px solid var(--border)', fontSize: '12px', color: 'var(--tx3)' }}>
+              <i className="fa-solid fa-shield-halved me-1" style={{ color: 'var(--amber)' }}></i>
+              {isManager(user) && !isAdmin(user) && 'Managers review disputes and may remove mistaken violations (2FA). User suspend and Excel export are admin-only.'}
+              {(isAdmin(user) || isSupervisor(user)) && (
+                <>Users are <strong>suspended</strong>, not deleted. Role changes are Supervisor Console only.{suspended > 0 && <span style={{ marginLeft: 8, color: 'var(--red)' }}>{suspended} suspended</span>}</>
+              )}
             </div>
           </div>
+
+          <DisputesReviewPanel user={user} />
+
+          {canViewAudit(user) && (
+          <div className="c mt-4">
+            <div className="c-head">
+              <div className="c-title"><i className="fa-solid fa-clipboard-list me-2"></i>Audit log (read-only)</div>
+              <div className="c-sub">Security events — cannot be deleted</div>
+            </div>
+            <div className="c-body" style={{ maxHeight: 280, overflowY: 'auto', padding: 0 }}>
+              <table className="tbl" style={{ fontSize: 12 }}>
+                <thead><tr><th>Time</th><th>Actor</th><th>Role</th><th>Action</th><th>Details</th></tr></thead>
+                <tbody>
+                  {auditLogs.length === 0 ? (
+                    <tr><td colSpan={5} className="text-center py-4 text-muted">No audit entries yet</td></tr>
+                  ) : auditLogs.map((log) => (
+                    <tr key={log.id}>
+                      <td style={{ whiteSpace: 'nowrap' }}>{log.created_at}</td>
+                      <td>{log.actor_email}</td>
+                      <td>{log.actor_role}</td>
+                      <td><code>{log.action}</code></td>
+                      <td style={{ color: 'var(--tx3)' }}>{log.details || log.target_id || '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          )}
         </div>
       </main>
 
-      {/* Delete confirm modal */}
-      {confirmDelete && (
+      {confirmSuspend && (
         <div style={{
           position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 9999,
           display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px',
@@ -413,31 +527,38 @@ const Admin = () => {
           <div className="c" style={{ maxWidth: 420, width: '100%', padding: 0 }}>
             <div className="c-head" style={{ borderBottom: '1px solid rgba(239,68,68,0.2)' }}>
               <div className="c-title" style={{ color: 'var(--red)' }}>
-                <i className="fa-solid fa-triangle-exclamation me-2"></i>Delete User
+                <i className="fa-solid fa-triangle-exclamation me-2"></i>Suspend User
               </div>
             </div>
             <div className="c-body">
               <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '16px' }}>
                 <div style={{
                   width: 48, height: 48, borderRadius: '50%',
-                  background: avatarColor(confirmDelete.role),
+                  background: avatarColor(confirmSuspend.role),
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                   fontSize: '18px', fontWeight: 800, color: '#fff', flexShrink: 0,
                 }}>
-                  {initials(confirmDelete.name)}
+                  {initials(confirmSuspend.name)}
                 </div>
                 <div>
-                  <div style={{ fontWeight: 700, color: 'var(--tx1)' }}>{confirmDelete.name}</div>
-                  <div style={{ fontSize: '13px', color: 'var(--tx3)' }}>{confirmDelete.email}</div>
+                  <div style={{ fontWeight: 700, color: 'var(--tx1)' }}>{confirmSuspend.name}</div>
+                  <div style={{ fontSize: '13px', color: 'var(--tx3)' }}>{confirmSuspend.email}</div>
                 </div>
               </div>
-              <p style={{ color: 'var(--tx2)', fontSize: '14px', lineHeight: 1.6, marginBottom: '20px' }}>
-                This will permanently delete the account and all associated data. This action cannot be undone.
+              <p style={{ color: 'var(--tx2)', fontSize: '14px', lineHeight: 1.6, marginBottom: '12px' }}>
+                Suspended users cannot sign in. Violation history is kept for audit. You can reactivate later.
               </p>
+              <input className="finput mb-2" id="suspend-reason" placeholder="Reason (optional)" defaultValue="Policy violation" />
+              {!isSupervisor(user) && (
+                <input className="finput mb-3" placeholder="Your 2FA code (required)" value={suspendTotp} onChange={(e) => setSuspendTotp(e.target.value)} maxLength={6} />
+              )}
               <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
-                <button className="btn-ghost btn-sm" onClick={() => setConfirmDelete(null)}>Cancel</button>
-                <button className="btn-danger-outline" onClick={() => handleDelete(confirmDelete)}>
-                  <i className="fa-solid fa-trash me-1"></i>Delete
+                <button className="btn-ghost btn-sm" onClick={() => setConfirmSuspend(null)}>Cancel</button>
+                <button className="btn-danger-outline" onClick={() => {
+                  const reason = document.getElementById('suspend-reason')?.value || 'Policy violation';
+                  handleSuspend(confirmSuspend, reason, isSupervisor(user) ? undefined : suspendTotp);
+                }}>
+                  <i className="fa-solid fa-ban me-1"></i>Suspend
                 </button>
               </div>
             </div>

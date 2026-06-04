@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { apiFetch } from '../utils/api.js';
 
 
 export default function useDetectionSettingsSync() {
@@ -7,7 +8,7 @@ export default function useDetectionSettingsSync() {
   const [settingsSynced, setSettingsSynced] = useState(false);
 
   useEffect(() => {
-    fetch('/api/detection/settings')
+    apiFetch('/api/detection/settings')
       .then((r) => r.json())
       .then((data) => {
         if (data.enabled_classes) setEnabledClasses(data.enabled_classes);
@@ -22,9 +23,8 @@ export default function useDetectionSettingsSync() {
   useEffect(() => {
     if (!settingsSynced) return;
     const t = setTimeout(() => {
-      fetch('/api/detection/settings', {
+      apiFetch('/api/detection/settings', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ conf_thresh: confThresh }),
       }).catch(() => {});
     }, 400);
@@ -33,9 +33,8 @@ export default function useDetectionSettingsSync() {
 
   const updateEnabledClasses = useCallback((classes) => {
     setEnabledClasses(classes);
-    fetch('/api/detection/settings', {
+    apiFetch('/api/detection/settings', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled_classes: classes }),
     }).catch(() => {});
   }, []);

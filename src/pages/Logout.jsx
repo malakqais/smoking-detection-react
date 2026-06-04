@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import logo from '../assets/LOGO.png';
+import { apiFetch, setSessionToken } from '../utils/api.js';
 
 const Logout = () => {
   const navigate = useNavigate();
@@ -8,9 +9,12 @@ const Logout = () => {
   const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'dark');
 
   useEffect(() => {
+    apiFetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
+    setSessionToken(null);
     localStorage.removeItem("isLoggedIn");
     localStorage.removeItem("user");
     localStorage.removeItem("loginTime");
+    localStorage.removeItem("activeSessionId");
   }, []);
 
   useEffect(() => {

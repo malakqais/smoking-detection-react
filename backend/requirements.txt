@@ -1,0 +1,9 @@
+flask
+opencv-python
+ultralytics
+werkzeug
+pyotp
+qrcode
+openpyxl
+# For GPU inference, install CUDA PyTorch separately, e.g.:
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124

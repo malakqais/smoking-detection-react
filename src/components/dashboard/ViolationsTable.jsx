@@ -1,9 +1,8 @@
 import React from 'react';
 
 const ViolationsTable = ({
-  userRole,
+  isStaffUser = false,
   exportCSV,
-  clearLogs,
   searchQuery,
   setSearchQuery,
   locFilter,
@@ -11,7 +10,6 @@ const ViolationsTable = ({
   locations,
   filteredViolations,
   setSelectedEvidence,
-  onDeleteViolation,
 }) => {
   return (
     <div className="c">
@@ -21,11 +19,10 @@ const ViolationsTable = ({
           <div className="c-sub">Full detection history</div>
         </div>
         <div style={{ display: 'flex', gap: '8px' }}>
-          {userRole === 'admin' && (
-            <>
-              <button className="btn-ghost btn-sm" onClick={exportCSV}><i className="fa-solid fa-download me-1"></i>Export</button>
-              <button className="btn-ghost btn-sm" onClick={clearLogs}><i className="fa-solid fa-trash me-1"></i>Clear</button>
-            </>
+          {isStaffUser && (
+            <button type="button" className="btn-ghost btn-sm" onClick={exportCSV}>
+              <i className="fa-solid fa-download me-1"></i>Export CSV
+            </button>
           )}
         </div>
       </div>
@@ -45,11 +42,11 @@ const ViolationsTable = ({
       <div style={{ overflowX: 'auto' }}>
         <table className="tbl">
           <thead>
-            <tr><th>#</th><th>Timestamp</th><th>Location</th><th>Person</th><th>Detected</th><th>Evidence</th>{userRole === 'admin' && <th></th>}</tr>
+            <tr><th>#</th><th>Timestamp</th><th>Location</th><th>Person</th><th>Detected</th><th>Evidence</th></tr>
           </thead>
           <tbody>
             {filteredViolations.length === 0 ? (
-              <tr><td colSpan="7" className="text-center py-5 text-muted">No records found</td></tr>
+              <tr><td colSpan="6" className="text-center py-5 text-muted">No records found</td></tr>
             ) : (
               filteredViolations.map((v, i) => {
                 const typeColor = { cigarette: 'var(--red)', smoke: '#94a3b8', vape: 'var(--purple)', unknown: 'var(--tx3)' };
@@ -68,22 +65,10 @@ const ViolationsTable = ({
                       </span>
                     </td>
                     <td>
-                      <button className="btn-r btn-sm" onClick={() => setSelectedEvidence(v)}>
+                      <button type="button" className="btn-r btn-sm" onClick={() => setSelectedEvidence(v)}>
                         <i className="fa-solid fa-image me-1"></i>View
                       </button>
                     </td>
-                    {userRole === 'admin' && (
-                      <td>
-                        <button
-                          className="ib btn-sm"
-                          title="Delete this violation"
-                          style={{ color: 'var(--tx3)' }}
-                          onClick={() => onDeleteViolation(v.id)}
-                        >
-                          <i className="fa-solid fa-trash"></i>
-                        </button>
-                      </td>
-                    )}
                   </tr>
                 );
               })

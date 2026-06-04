@@ -1,6 +1,6 @@
 import React from 'react';
 
-const NotificationDrawer = ({ notifOpen, violations, onClose, onClear }) => {
+const NotificationDrawer = ({ notifOpen, violations, onClose }) => {
   return (
     <aside className={`notif-drawer ${notifOpen ? 'open' : ''}`}>
       <div className="notif-head">
@@ -29,7 +29,7 @@ const NotificationDrawer = ({ notifOpen, violations, onClose, onClear }) => {
         )}
       </div>
       <div className="notif-foot">
-        <button className="btn-ghost btn-sm w-100" onClick={onClear}>Clear All</button>
+        <button type="button" className="btn-ghost btn-sm w-100" onClick={onClose}>Close panel</button>
       </div>
     </aside>
   );

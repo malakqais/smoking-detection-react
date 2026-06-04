@@ -1,6 +1,11 @@
 import React from 'react';
 
-const CameraGrid = ({ activeCams, currentTime, todayCount, detectionRunning }) => {
+const CameraGrid = ({ activeCams, currentTime, todayCount, detectionRunning, gpuInfo }) => {
+  const gpuLabel = gpuInfo?.mode === 'gpu_farm'
+    ? `GPU farm · ${gpuInfo.gpu_count} cards`
+    : gpuInfo?.mode === 'gpu'
+      ? (gpuInfo.gpu_names?.[0] || 'CUDA')
+      : 'CPU';
   return (
     <div className="c mb-4 stagger-3">
       <div className="c-head" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -25,16 +30,17 @@ const CameraGrid = ({ activeCams, currentTime, todayCount, detectionRunning }) =
                     <img
                       src={cam.isWebcam ? `/api/detection/video_feed_user/${encodeURIComponent(cam.userRef)}` : `/api/detection/video_feed/${i}`}
                       alt="Video Feed"
+                      decoding="async"
+                      fetchPriority="high"
                       style={{ width: '100%', height: '100%', objectFit: 'cover', position: 'absolute', top: 0, left: 0, zIndex: 0 }}
                       onError={(e) => { e.target.style.display = 'none'; }}
                     />
                     <div className="cf-hud-grid"></div>
                     <div className="cf-hud-crosshair"></div>
                     <div className="cf-hud-telemetry">
-                      LATENCY: {(10 + i * 2)}ms<br />
-                      FPS: 29.4 | 1080p<br />
-                      GPU INFERENCE: 6.2ms<br />
-                      STAGE-2: PERSON isol.
+                      LIVE PREVIEW<br />
+                      Infer: {gpuLabel}{gpuInfo?.fp16_enabled ? ' · FP16' : ''}<br />
+                      AI async pipeline
                     </div>
                   </>
                 ) : (

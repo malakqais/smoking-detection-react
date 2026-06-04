@@ -150,8 +150,8 @@ const SignUp = () => {
                 />
               </div>
               {email.endsWith('@smoker.jr') ? (
-                <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--red)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  <i className="fa-solid fa-shield-halved"></i> This email will receive <strong>admin</strong> access
+                <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--amber)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <i className="fa-solid fa-crown"></i> First <strong>@smoker.jr</strong> account becomes <strong>supervisor</strong> if none exists yet.
                 </div>
               ) : email.includes('@') && (
                 <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--tx3)', display: 'flex', alignItems: 'center', gap: '6px' }}>

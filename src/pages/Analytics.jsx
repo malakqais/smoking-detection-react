@@ -14,6 +14,11 @@ import {
   Filler
 } from 'chart.js';
 import logo from '../assets/LOGO.png';
+import { apiFetch } from '../utils/api.js';
+import { isStaff } from '../utils/roles.js';
+import { useCurrentUser } from '../hooks/useCurrentUser.js';
+import AppSidebar from '../components/layout/AppSidebar.jsx';
+import StaffRoleBanner from '../components/layout/StaffRoleBanner.jsx';
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, ArcElement, Tooltip, Legend, Filler);
 
@@ -24,7 +29,7 @@ const Analytics = () => {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'dark');
   const [notifOpen, setNotifOpen] = useState(false);
-  const [user] = useState(() => JSON.parse(localStorage.getItem('user') || '{"name":"User","role":"admin","email":"user@example.com"}'));
+  const { user, syncing: userSyncing } = useCurrentUser();
   const [stats, setStats] = useState(null);
   const [violations, setViolations] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -35,11 +40,16 @@ const Analytics = () => {
   }, [theme]);
 
   const fetchStats = async () => {
+    if (!isStaff(user) && userSyncing) return;
     try {
-      const res = await fetch('/api/violations/stats');
-      if (res.ok) setStats(await res.json());
+      if (isStaff(user)) {
+        const res = await apiFetch('/api/violations/stats');
+        if (res.ok) setStats(await res.json());
+      } else {
+        setStats(null);
+      }
 
-      const vRes = await fetch('/api/violations?limit=500');
+      const vRes = await apiFetch('/api/violations?limit=500');
       if (vRes.ok) setViolations(await vRes.json());
     } catch (e) {
       console.error('Failed to fetch stats', e);
@@ -49,10 +59,11 @@ const Analytics = () => {
   };
 
   useEffect(() => {
+    if (userSyncing) return undefined;
     fetchStats();
     const poll = setInterval(fetchStats, 5000);
     return () => clearInterval(poll);
-  }, []);
+  }, [userSyncing, user.role]);
 
   const toggleTheme = () => setTheme(prev => prev === 'dark' ? 'light' : 'dark');
   const toggleSidebar = () => {
@@ -64,7 +75,7 @@ const Analytics = () => {
   const isDark = theme === 'dark';
   const gridColor = isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.06)';
   const tickColor = '#94a3b8';
-  const isAdmin = user.role === 'admin';
+  const staffView = isStaff(user);
   const commonOptions = {
     responsive: true,
     maintainAspectRatio: false,
@@ -216,32 +227,12 @@ const Analytics = () => {
       <div className={`sb-overlay ${sidebarOpen ? 'visible' : ''}`} onClick={() => setSidebarOpen(false)}></div>
       <div className={`notif-overlay ${notifOpen ? 'visible' : ''}`} onClick={() => setNotifOpen(false)}></div>
 
-      {/* Sidebar */}
-      <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''} ${sidebarOpen ? 'open' : ''}`}>
-        <div className="sb-logo">
-          <img src={logo} alt="Logo" />
-          <div>
-            <div className="sb-logo-name">SmokeDet System</div>
-            <div className="sb-logo-sub">{user.name} ({user.role})</div>
-          </div>
-          <button className="sb-collapse-btn" onClick={toggleSidebar}>
-            <i className={`fa-solid ${sidebarCollapsed ? 'fa-chevron-right' : 'fa-chevron-left'}`}></i>
-          </button>
-        </div>
-        <nav className="sb-nav">
-          <div className="sb-section">Main</div>
-          <NavLink className="sb-item" to="/"><i className="fa-solid fa-gauge-high"></i><span className="sb-label">Dashboard</span></NavLink>
-          <NavLink className="sb-item" to="/analytics"><i className="fa-solid fa-chart-pie"></i><span className="sb-label">Analytics</span></NavLink>
-          {user.role === 'admin' && (
-            <NavLink className="sb-item" to="/admin"><i className="fa-solid fa-user-shield"></i><span className="sb-label">Admin Panel</span></NavLink>
-          )}
-          <div className="sb-section">Account</div>
-          <NavLink className="sb-item" to="/profile"><i className="fa-solid fa-circle-user"></i><span className="sb-label">Profile</span></NavLink>
-          <NavLink className="sb-item" to="/settings"><i className="fa-solid fa-sliders"></i><span className="sb-label">Settings</span></NavLink>
-          <div className="sb-section">System</div>
-          <NavLink className="sb-item" to="/logout"><i className="fa-solid fa-right-from-bracket"></i><span className="sb-label">Logout</span></NavLink>
-        </nav>
-      </aside>
+      <AppSidebar
+        user={user}
+        collapsed={sidebarCollapsed}
+        open={sidebarOpen}
+        onToggleCollapse={toggleSidebar}
+      />
 
       {/* Main Area */}
       <main className="main">
@@ -273,12 +264,12 @@ const Analytics = () => {
         </header>
 
         <div className="content">
-          {loading ? (
+          {loading || userSyncing ? (
             <div className="text-center py-5">
               <i className="fa-solid fa-spinner fa-spin fa-2x mb-2" style={{ color: 'var(--red)' }}></i>
               <p style={{ color: 'var(--tx3)' }}>Loading statistics...</p>
             </div>
-          ) : !isAdmin ? (
+          ) : !staffView ? (
             /* ── USER FULL PERSONAL ANALYTICS ── */
             <>
               <div className="user-awareness-banner mb-4" style={{ background: 'linear-gradient(135deg, rgba(59, 130, 246, 0.15) 0%, rgba(59, 130, 246, 0.05) 100%)', borderColor: 'rgba(59, 130, 246, 0.25)' }}>
@@ -412,9 +403,9 @@ const Analytics = () => {
               </div>
             </>
           ) : (
-            /* ── ADMIN FULL VIEW ── */
+            /* ── STAFF (manager / supervisor) analytics ── */
             <>
-              {/* KPIs */}
+              <StaffRoleBanner user={user} />
               <div className="kpi-grid mb-4">
                 <div className="kpi r">
                   <div className="kpi-icon"><i className="fa-solid fa-triangle-exclamation"></i></div>

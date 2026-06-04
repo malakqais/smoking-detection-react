@@ -123,3 +123,94 @@ def send_test_email(recipient_email, smtp_email=None, smtp_app_password=None):
     except Exception as e:
         print(f"❌ Test Email Delivery Failed: {e}")
         return False
+
+
+def send_login_notification_email(
+    recipient_email,
+    user_name,
+    *,
+    ip_address,
+    os_name,
+    browser,
+    user_agent,
+    login_time,
+    language="",
+):
+    """Alert account owner that a new session was started (includes self-login)."""
+    msg = EmailMessage()
+    smtp_email, smtp_password = _smtp_credentials()
+    msg["Subject"] = "New sign-in to your SmokeDet account"
+    msg["From"] = smtp_email
+    msg["To"] = recipient_email
+
+    lang_line = f"Language:          {language}\n" if language else ""
+    body = f"""
+Hello {user_name},
+
+A new sign-in to your SmokeDet account was detected.
+
+─────────────────────────────────────
+SESSION DETAILS
+─────────────────────────────────────
+Time:              {login_time}
+IP address:        {ip_address}
+Operating system:  {os_name}
+Browser:           {browser}
+{lang_line}User-Agent:        {user_agent}
+─────────────────────────────────────
+
+If this was you, no action is needed.
+
+If you do not recognize this activity, change your password immediately
+and enable two-factor authentication in Settings.
+
+— SmokeDet Security
+"""
+    msg.set_content(body.strip())
+
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(smtp_email, smtp_password)
+            server.send_message(msg)
+        print(f"Login notification sent to {recipient_email} (IP {ip_address})")
+        return True
+    except Exception as e:
+        print(f"Login notification email failed: {e}")
+        return False
+
+
+def send_security_code_email(recipient_email, code, purpose_label, expires_minutes=10):
+    """Send a 6-digit security code (password reset or 2FA recovery)."""
+    msg = EmailMessage()
+    smtp_email, smtp_password = _smtp_credentials()
+    msg["Subject"] = f"SmokeDet security code — {purpose_label}"
+    msg["From"] = smtp_email
+    msg["To"] = recipient_email
+
+    body = f"""
+Hello,
+
+Your SmokeDet verification code is:
+
+    {code}
+
+This code is for: {purpose_label}
+It expires in {expires_minutes} minutes and can only be used once.
+
+If you did not request this, you can ignore this email.
+
+— SmokeDet Security
+"""
+    msg.set_content(body.strip())
+
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(smtp_email, smtp_password)
+            server.send_message(msg)
+        print(f"✅ Security code email sent to {recipient_email} ({purpose_label})")
+        return True
+    except Exception as e:
+        print(f"❌ Security code email failed: {e}")
+        return False

@@ -19,6 +19,11 @@ import CameraGrid from '../components/dashboard/CameraGrid';
 import ViolationsTable from '../components/dashboard/ViolationsTable';
 import NotificationDrawer from '../components/dashboard/NotificationDrawer';
 import EvidenceModal from '../components/dashboard/EvidenceModal';
+import { apiFetch } from '../utils/api.js';
+import { isAdmin, isManager, isStaff, isSupervisor, ROLE_LABELS, normalizeRole } from '../utils/roles.js';
+import { useCurrentUser } from '../hooks/useCurrentUser.js';
+import AppSidebar from '../components/layout/AppSidebar.jsx';
+import StaffRoleBanner from '../components/layout/StaffRoleBanner.jsx';
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Tooltip, Legend, Filler);
 
@@ -28,7 +33,7 @@ const Dashboard = () => {
   const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'dark');
   const [notifOpen, setNotifOpen] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [user] = useState(() => JSON.parse(localStorage.getItem('user') || '{"name":"User","role":"admin","email":"user@example.com"}'));
+  const { user, syncing: userSyncing } = useCurrentUser();
 
   const [violations, setViolations] = useState([]);
   const [myViolations, setMyViolations] = useState([]);
@@ -39,6 +44,7 @@ const Dashboard = () => {
   const [paying, setPaying] = useState(false);
 
   const [detectionRunning, setDetectionRunning] = useState(false);
+  const [gpuInfo, setGpuInfo] = useState(null);
   const [activeWebcamUsers, setActiveWebcamUsers] = useState([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [locFilter, setLocFilter] = useState("");
@@ -57,67 +63,94 @@ const Dashboard = () => {
   const studentVideoRef = useRef(null);
   const studentCanvasRef = useRef(null);
   const studentStreamRef = useRef(null);
+  const uploadInFlightRef = useRef(false);
+  const rafRef = useRef(null);
 
   useEffect(() => {
     // ONLY run webcam capture for standard users
-    if (user.role === 'admin') return;
-    
-    let activeInterval = null;
+    if (isStaff(user)) return;
 
-    if (detectionRunning) {
-      console.log("[AI Stream] Starting background student webcam stream...");
-      
-      const video = document.createElement('video');
-      video.width = 640;
-      video.height = 480;
-      video.autoplay = true;
-      video.playsInline = true;
-      studentVideoRef.current = video;
+    let stopped = false;
 
-      const canvas = document.createElement('canvas');
-      canvas.width = 640;
-      canvas.height = 480;
-      studentCanvasRef.current = canvas;
-
-      navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } })
-        .then(stream => {
-          studentStreamRef.current = stream;
-          video.srcObject = stream;
-          video.play();
-
-          const autoCapture = localStorage.getItem('autoCapture') !== 'false';
-          const uploadFps = Math.max(1, Number(localStorage.getItem('throttle') || 60));
-          const uploadIntervalMs = Math.max(16, Math.round(1000 / uploadFps));
-          activeInterval = setInterval(() => {
-            if (!autoCapture) return;
-            if (video.readyState === video.HAVE_ENOUGH_DATA) {
-              const ctx = canvas.getContext('2d');
-              ctx.drawImage(video, 0, 0, 640, 480);
-              
-              // Compress to jpeg at 60% quality to save network bandwidth
-              const base64Img = canvas.toDataURL('image/jpeg', 0.60);
-              
-              fetch('/api/detection/upload_frame', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username: user.name, image: base64Img })
-              }).catch(err => console.error("[AI Stream] Upload failed", err));
-            }
-          }, uploadIntervalMs);
-        })
-        .catch(err => {
-          console.warn("[AI Stream] Webcam access denied or unavailable:", err);
-        });
-    }
-
-    return () => {
-      if (activeInterval) clearInterval(activeInterval);
+    const stopCapture = () => {
+      stopped = true;
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
       if (studentStreamRef.current) {
-        console.log("[AI Stream] Releasing student webcam...");
-        studentStreamRef.current.getTracks().forEach(track => track.stop());
+        studentStreamRef.current.getTracks().forEach((track) => track.stop());
         studentStreamRef.current = null;
       }
     };
+
+    if (!detectionRunning) {
+      return stopCapture;
+    }
+
+    const video = document.createElement('video');
+    video.width = 640;
+    video.height = 480;
+    video.autoplay = true;
+    video.playsInline = true;
+    video.muted = true;
+    studentVideoRef.current = video;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 640;
+    canvas.height = 480;
+    studentCanvasRef.current = canvas;
+
+    const autoCapture = localStorage.getItem('autoCapture') !== 'false';
+    const uploadFps = Math.min(60, Math.max(15, Number(localStorage.getItem('throttle') || 30)));
+    const minUploadGapMs = Math.round(1000 / uploadFps);
+    let lastUploadAt = 0;
+
+    const tick = (now) => {
+      if (stopped) return;
+      rafRef.current = requestAnimationFrame(tick);
+      if (!autoCapture || uploadInFlightRef.current) return;
+      if (now - lastUploadAt < minUploadGapMs) return;
+      if (video.readyState < video.HAVE_ENOUGH_DATA) return;
+
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0, 640, 480);
+      const base64Img = canvas.toDataURL('image/jpeg', 0.72);
+      lastUploadAt = now;
+      uploadInFlightRef.current = true;
+
+      apiFetch('/api/detection/upload_frame', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: base64Img }),
+      })
+        .catch(() => {})
+        .finally(() => {
+          uploadInFlightRef.current = false;
+        });
+    };
+
+    navigator.mediaDevices
+      .getUserMedia({
+        video: {
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+          frameRate: { ideal: 30, max: 60 },
+        },
+        audio: false,
+      })
+      .then((stream) => {
+        if (stopped) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        studentStreamRef.current = stream;
+        video.srcObject = stream;
+        video.play().catch(() => {});
+        rafRef.current = requestAnimationFrame(tick);
+      })
+      .catch((err) => {
+        console.warn('[AI Stream] Webcam access denied or unavailable:', err);
+      });
+
+    return stopCapture;
   }, [detectionRunning, user.role, user.name]);
 
   // Dynamic AI Diagnostics Live-Stream logs
@@ -129,7 +162,7 @@ const Dashboard = () => {
 
   const fetchDetectionLogs = async () => {
     try {
-      const res = await fetch('/api/detection/logs?limit=50');
+      const res = await apiFetch('/api/detection/logs?limit=50');
       if (!res.ok) return;
       const logs = await res.json();
       if (!Array.isArray(logs) || logs.length === 0) return;
@@ -158,7 +191,7 @@ const Dashboard = () => {
 
   const fetchViolations = async () => {
     try {
-      const res = await fetch('/api/violations?limit=500');
+      const res = await apiFetch('/api/violations?limit=500');
       if (res.ok) {
         const data = await res.json();
         setViolations(data);
@@ -190,21 +223,22 @@ const Dashboard = () => {
 
   const fetchDetectionStatus = async () => {
     try {
-      const res = await fetch('/api/detection/status');
+      const res = await apiFetch('/api/detection/status');
       if (res.ok) {
         const data = await res.json();
         setDetectionRunning(data.running);
+        if (data.gpu) setGpuInfo(data.gpu);
       }
     } catch {}
   };
 
   const fetchActiveWebcamStreams = async () => {
-    if (user.role !== 'admin' || !detectionRunning) {
+    if (!isStaff(user) || !detectionRunning) {
       setActiveWebcamUsers([]);
       return;
     }
     try {
-      const res = await fetch('/api/detection/active_streams');
+      const res = await apiFetch('/api/detection/active_streams');
       if (res.ok) {
         const data = await res.json();
         setActiveWebcamUsers(data);
@@ -227,12 +261,12 @@ const Dashboard = () => {
   }, []);
 
   useEffect(() => {
-    if (user.role !== 'admin') return;
+    if (!isStaff(user)) return;
     let streamPoll = null;
     if (detectionRunning) {
       fetchActiveWebcamStreams();
       // Fast check for active user cams every 3 seconds to keep UI highly reactive
-      streamPoll = setInterval(fetchActiveWebcamStreams, 3000);
+      streamPoll = setInterval(fetchActiveWebcamStreams, 1000);
     } else {
       setActiveWebcamUsers([]);
     }
@@ -243,7 +277,7 @@ const Dashboard = () => {
 
   const toggleDetection = async () => {
     if (detectionRunning) {
-      await fetch('/api/detection/stop', { method: 'POST' });
+      await apiFetch('/api/detection/stop', { method: 'POST' });
       setDetectionRunning(false);
     } else {
       const storedCameras = JSON.parse(localStorage.getItem('cameras')) || [
@@ -252,7 +286,7 @@ const Dashboard = () => {
         { id: 2, location: 'Cafeteria', enabled: false }
       ];
       const activeCams = storedCameras.filter(c => c.enabled).map(c => ({ index: c.id, location: c.location }));
-      await fetch('/api/detection/start', {
+      await apiFetch('/api/detection/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ cameras: activeCams.length > 0 ? activeCams : [{ index: 0, location: 'Main Lobby' }] })
@@ -274,7 +308,7 @@ const Dashboard = () => {
   const locations = useMemo(() => [...new Set(violations.map(v => v.location).filter(Boolean))], [violations]);
 
   const activeCams = useMemo(() => {
-    if (user.role === 'admin' && activeWebcamUsers.length > 0) {
+    if (isStaff(user) && activeWebcamUsers.length > 0) {
       return activeWebcamUsers.map((username, i) => ({
         name: `${username}'s Workspace`,
         cam: `Webcam Feed`,
@@ -300,7 +334,7 @@ const Dashboard = () => {
 
   const filteredViolations = useMemo(() => {
     return violations.filter(v => {
-      if (user.role === 'admin' && v.name === user.name) return false;
+      if (isStaff(user) && v.name === user.name) return false;
       const q = searchQuery.toLowerCase();
       const matchQ = !q || v.location?.toLowerCase().includes(q) || v.name?.toLowerCase().includes(q) || v.time?.toLowerCase().includes(q);
       const matchL = !locFilter || v.location === locFilter;
@@ -382,22 +416,7 @@ const Dashboard = () => {
     document.body.removeChild(link);
   };
 
-  const clearLogs = () => {
-    setConfirmMessage("Are you sure you want to permanently clear all violation logs? This will wipe the surveillance archive.");
-    setConfirmCallback(() => async () => {
-      await fetch('/api/violations/clear', { method: 'POST' });
-      setViolations([]);
-      prevCount.current = 0;
-    });
-    setShowConfirmModal(true);
-  };
-
-  const handleDeleteViolation = async (violationId) => {
-    await fetch(`/api/violations/${violationId}/delete`, { method: 'POST' });
-    setViolations(prev => prev.filter(x => x.id !== violationId));
-  };
-
-  if (loading) {
+  if (loading || userSyncing) {
     return (
       <div className="layout">
         <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
@@ -421,7 +440,7 @@ const Dashboard = () => {
   }
 
   /* ── USER VIEW ─────────────────────────────────────────────── */
-  if (user.role !== 'admin') {
+  if (!isStaff(user)) {
     const unpaidFine = myViolations.length * 20;
     const MONITORED_ZONES = activeCams.map(c => c.name);
 
@@ -452,28 +471,12 @@ const Dashboard = () => {
     return (
       <div className="layout">
         <div className={`sb-overlay ${sidebarOpen ? 'visible' : ''}`} onClick={() => setSidebarOpen(false)}></div>
-        <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''} ${sidebarOpen ? 'open' : ''}`}>
-          <div className="sb-logo">
-            <img src={logo} alt="Logo" />
-            <div>
-              <div className="sb-logo-name">SmokeDet System</div>
-              <div className="sb-logo-sub">{user.name} (user)</div>
-            </div>
-            <button className="sb-collapse-btn" onClick={toggleSidebar}>
-              <i className={`fa-solid ${sidebarCollapsed ? 'fa-chevron-right' : 'fa-chevron-left'}`}></i>
-            </button>
-          </div>
-          <nav className="sb-nav">
-            <div className="sb-section">Main</div>
-            <NavLink className="sb-item" to="/"><i className="fa-solid fa-gauge-high"></i><span className="sb-label">Dashboard</span></NavLink>
-            <NavLink className="sb-item" to="/analytics"><i className="fa-solid fa-chart-pie"></i><span className="sb-label">Analytics</span></NavLink>
-            <div className="sb-section">Account</div>
-            <NavLink className="sb-item" to="/profile"><i className="fa-solid fa-circle-user"></i><span className="sb-label">Profile</span></NavLink>
-            <NavLink className="sb-item" to="/settings"><i className="fa-solid fa-sliders"></i><span className="sb-label">Settings</span></NavLink>
-            <div className="sb-section">System</div>
-            <NavLink className="sb-item" to="/logout"><i className="fa-solid fa-right-from-bracket"></i><span className="sb-label">Logout</span></NavLink>
-          </nav>
-        </aside>
+        <AppSidebar
+          user={user}
+          collapsed={sidebarCollapsed}
+          open={sidebarOpen}
+          onToggleCollapse={toggleSidebar}
+        />
         <main className="main">
           <header className="top-bar">
             <div className="tb-left">
@@ -821,35 +824,14 @@ const Dashboard = () => {
         notifOpen={notifOpen}
         violations={violations}
         onClose={() => setNotifOpen(false)}
-        onClear={clearLogs}
       />
 
-      {/* Sidebar */}
-      <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''} ${sidebarOpen ? 'open' : ''}`}>
-        <div className="sb-logo">
-          <img src={logo} alt="Logo" />
-          <div>
-            <div className="sb-logo-name">SmokeDet System</div>
-            <div className="sb-logo-sub">{user.name} ({user.role})</div>
-          </div>
-          <button className="sb-collapse-btn" onClick={toggleSidebar}>
-            <i className={`fa-solid ${sidebarCollapsed ? 'fa-chevron-right' : 'fa-chevron-left'}`}></i>
-          </button>
-        </div>
-        <nav className="sb-nav">
-          <div className="sb-section">Main</div>
-          <NavLink className="sb-item" to="/"><i className="fa-solid fa-gauge-high"></i><span className="sb-label">Dashboard</span></NavLink>
-          <NavLink className="sb-item" to="/analytics"><i className="fa-solid fa-chart-pie"></i><span className="sb-label">Analytics</span></NavLink>
-          {user.role === 'admin' && (
-            <NavLink className="sb-item" to="/admin"><i className="fa-solid fa-user-shield"></i><span className="sb-label">Admin Panel</span></NavLink>
-          )}
-          <div className="sb-section">Account</div>
-          <NavLink className="sb-item" to="/profile"><i className="fa-solid fa-circle-user"></i><span className="sb-label">Profile</span></NavLink>
-          <NavLink className="sb-item" to="/settings"><i className="fa-solid fa-sliders"></i><span className="sb-label">Settings</span></NavLink>
-          <div className="sb-section">System</div>
-          <NavLink className="sb-item" to="/logout"><i className="fa-solid fa-right-from-bracket"></i><span className="sb-label">Logout</span></NavLink>
-        </nav>
-      </aside>
+      <AppSidebar
+        user={user}
+        collapsed={sidebarCollapsed}
+        open={sidebarOpen}
+        onToggleCollapse={toggleSidebar}
+      />
 
       <main className="main">
         <header className="top-bar">
@@ -857,7 +839,16 @@ const Dashboard = () => {
             <div className="ib d-lg-none" onClick={() => setSidebarOpen(true)}><i className="fa-solid fa-bars"></i></div>
             <div>
               <div className="pg-title">Dashboard</div>
-              <div className="pg-sub">{currentTime}</div>
+              <div className="pg-sub">
+                {isSupervisor(user)
+                  ? 'Supervisor monitoring'
+                  : isAdmin(user)
+                    ? 'Admin operations'
+                    : isManager(user)
+                      ? 'Manager operations'
+                      : currentTime}
+                {isStaff(user) && ` · ${ROLE_LABELS[normalizeRole(user.role)]}`}
+              </div>
             </div>
           </div>
           <div className="tb-right">
@@ -891,6 +882,7 @@ const Dashboard = () => {
         </header>
 
         <div className="content fade-in">
+          <StaffRoleBanner user={user} />
           <KpiCards
             todayCount={todayCount}
             totalViolations={violations.length}
@@ -921,12 +913,12 @@ const Dashboard = () => {
             currentTime={currentTime}
             todayCount={todayCount}
             detectionRunning={detectionRunning}
+            gpuInfo={gpuInfo}
           />
 
           <ViolationsTable
-            userRole={user.role}
+            isStaffUser={isStaff(user)}
             exportCSV={exportCSV}
-            clearLogs={clearLogs}
             searchQuery={searchQuery}
             setSearchQuery={setSearchQuery}
             locFilter={locFilter}
@@ -934,7 +926,6 @@ const Dashboard = () => {
             locations={locations}
             filteredViolations={filteredViolations}
             setSelectedEvidence={setSelectedEvidence}
-            onDeleteViolation={handleDeleteViolation}
           />
         </div>
       </main>

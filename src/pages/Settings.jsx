@@ -2,8 +2,13 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import logo from '../assets/LOGO.png';
 import useDetectionSettingsSync from '../hooks/useDetectionSettingsSync';
+import { apiFetch } from '../utils/api.js';
+import { isElevatedStaff, isStaff, isSupervisor, normalizeRole } from '../utils/roles.js';
+import { useCurrentUser } from '../hooks/useCurrentUser.js';
+import AppSidebar from '../components/layout/AppSidebar.jsx';
 import { playAlarmTone } from '../utils/alarmTone';
 import { useLocalStorage } from '../components/useLocalStorage';
+import { isValidTotpCode, normalizeTotpInput } from '../utils/totp.js';
 
 const NAV = [
   { id: 'account',       icon: 'fa-user',                 label: 'Account',      desc: 'Profile & password' },
@@ -30,6 +35,18 @@ const MODELS = [
   { name: 'vape_best.pt',       label: 'Vape',       color: '#8b5cf6' },
   { name: 'face_best.pt',       label: 'Face ID',    color: '#3b82f6' },
 ];
+
+function formatMemberSince(createdAt) {
+  if (!createdAt) return '—';
+  const raw = String(createdAt).trim();
+  const normalized = raw.includes(' ') && !raw.includes('T') ? raw.replace(' ', 'T') : raw;
+  const d = new Date(normalized);
+  if (!Number.isNaN(d.getTime())) {
+    return d.toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
+  }
+  const y = raw.slice(0, 4);
+  return /^\d{4}$/.test(y) ? y : '—';
+}
 
 const ALARM_TONES = [
   { id: 'high_beep',        name: 'High Beep (Default)', desc: 'Piercing sine frequency warning tone', color: 'var(--red)' },
@@ -63,7 +80,8 @@ const Settings = () => {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('sidebarCollapsed') === 'true');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'dark');
-  const [user, setUser] = useState(() => JSON.parse(localStorage.getItem('user') || '{"name":"User","role":"admin","email":"user@example.com"}'));
+  const { user, setUser } = useCurrentUser();
+  const memberSince = useMemo(() => formatMemberSince(user.created_at), [user.created_at]);
   const [activePanel, setActivePanel] = useState('account');
   const [toast, setToast] = useState({ show: false, msg: '', ok: true });
 
@@ -104,6 +122,12 @@ const Settings = () => {
   const [twoFACode, setTwoFACode] = useState('');
   const [twoFAError, setTwoFAError] = useState('');
   const [verifying2FA, setVerifying2FA] = useState(false);
+  const [showDisable2FAModal, setShowDisable2FAModal] = useState(false);
+  const [disable2FACode, setDisable2FACode] = useState('');
+  const [disable2FAError, setDisable2FAError] = useState('');
+  const [disable2FAInfo, setDisable2FAInfo] = useState('');
+  const [disable2FACodeSent, setDisable2FACodeSent] = useState(false);
+  const [disabling2FA, setDisabling2FA] = useState(false);
 
   // Custom confirmation modal states
   const [showConfirmModal, setShowConfirmModal] = useState(false);
@@ -146,6 +170,35 @@ const Settings = () => {
   }, [twoFA]);
 
   useEffect(() => {
+    if (user.login_notifications_enabled === undefined) return;
+    const enabled = user.login_notifications_enabled !== false;
+    setLoginNotif(enabled);
+    localStorage.setItem('loginNotif', enabled ? 'true' : 'false');
+  }, [user.login_notifications_enabled, setLoginNotif]);
+
+  const handleLoginNotifChange = async (enabled) => {
+    setLoginNotif(enabled);
+    localStorage.setItem('loginNotif', enabled ? 'true' : 'false');
+    try {
+      const res = await apiFetch('/api/users/update', {
+        method: 'POST',
+        body: JSON.stringify({
+          email: user.email,
+          login_notifications_enabled: enabled,
+        }),
+      });
+      if (res.ok) {
+        setUser({ ...user, login_notifications_enabled: enabled });
+        showToast(enabled ? 'Login email alerts enabled' : 'Login email alerts disabled');
+      } else {
+        showToast('Could not save preference', false);
+      }
+    } catch {
+      showToast('Network error', false);
+    }
+  };
+
+  useEffect(() => {
     fetch('/api/detection/settings')
       .then((r) => r.json())
       .then((data) => {
@@ -158,8 +211,8 @@ const Settings = () => {
   }, [setAlertCooldown, setEmailAlerts]);
 
   useEffect(() => {
-    if (user.role !== 'admin') return;
-    fetch('/api/settings/smtp')
+    if (!isStaff(user)) return;
+    apiFetch('/api/settings/smtp')
       .then((r) => r.json())
       .then((data) => {
         if (data.smtp_sender) setSmtpSender(data.smtp_sender);
@@ -256,26 +309,78 @@ const Settings = () => {
         showToast('Network error during 2FA setup', false);
       }
     } else {
-      try {
-        const res = await fetch('/api/2fa/disable', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email: user.email })
-        });
-        if (res.ok) {
-          setTwoFA(false);
-          const updated = { ...user, two_factor_enabled: 0 };
-          setUser(updated);
-          localStorage.setItem('user', JSON.stringify(updated));
-          localStorage.setItem('twoFA', 'false');
-          showToast('Two-factor authentication disabled.');
-        } else {
-          showToast('Failed to disable Two-Factor', false);
-        }
-      } catch {
-        showToast('Network error', false);
-      }
+      setDisable2FACode('');
+      setDisable2FAError('');
+      setDisable2FAInfo('');
+      setDisable2FACodeSent(false);
+      setShowDisable2FAModal(true);
+      sendDisable2FACode();
     }
+  };
+
+  const sendDisable2FACode = async () => {
+    setDisabling2FA(true);
+    setDisable2FAError('');
+    try {
+      const res = await apiFetch('/api/auth/2fa/send-email-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ purpose: 'disable_2fa' }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setDisable2FACodeSent(true);
+        setDisable2FAInfo(data.message || 'Check your email for a 6-digit code.');
+      } else {
+        setDisable2FAError(data.message || 'Could not send verification code');
+      }
+    } catch {
+      setDisable2FAError('Network error');
+    } finally {
+      setDisabling2FA(false);
+    }
+  };
+
+  const confirmDisable2FA = async (e) => {
+    e.preventDefault();
+    if (!isValidTotpCode(disable2FACode)) {
+      setDisable2FAError('Enter the 6-digit code from your email');
+      return;
+    }
+    setDisabling2FA(true);
+    setDisable2FAError('');
+    try {
+      const res = await apiFetch('/api/auth/2fa/disable-email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: disable2FACode }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setTwoFA(false);
+        const updated = { ...user, two_factor_enabled: 0 };
+        setUser(updated);
+        localStorage.setItem('user', JSON.stringify(updated));
+        localStorage.setItem('twoFA', 'false');
+        setShowDisable2FAModal(false);
+        setDisable2FACode('');
+        showToast('Two-factor authentication disabled.');
+      } else {
+        setDisable2FAError(data.message || 'Invalid or expired code');
+      }
+    } catch {
+      setDisable2FAError('Network error');
+    } finally {
+      setDisabling2FA(false);
+    }
+  };
+
+  const closeDisable2FAModal = () => {
+    setShowDisable2FAModal(false);
+    setDisable2FACode('');
+    setDisable2FAError('');
+    setDisable2FAInfo('');
+    setDisable2FACodeSent(false);
   };
 
   const verify2FA = async (e) => {
@@ -370,18 +475,6 @@ const Settings = () => {
     }
   };
 
-  const clearHistory = () => {
-    setConfirmMessage("Are you sure you want to permanently clear all violation history from the system database? This cannot be undone.");
-    setConfirmCallback(() => async () => {
-      try {
-        const r = await fetch('/api/violations/clear', { method: 'POST' });
-        if (r.ok) showToast('All violation history cleared');
-        else showToast('Error clearing history', false);
-      } catch { showToast('Network error', false); }
-    });
-    setShowConfirmModal(true);
-  };
-
   const updateCamera = (id, field, val) => {
     const newCams = cameras.map(c => c.id === id ? { ...c, [field]: val } : c);
     setCameras(newCams);
@@ -391,35 +484,22 @@ const Settings = () => {
   const confColor = confThresh >= 80 ? 'var(--green)' : confThresh >= 65 ? 'var(--amber)' : 'var(--red)';
   const isDark = theme === 'dark';
 
-  const visibleNav = NAV.filter(n => !['detection','cameras','sysinfo','danger'].includes(n.id) || user.role === 'admin');
+  const visibleNav = NAV.filter(n => !['detection','cameras','sysinfo','danger'].includes(n.id) || isStaff(user));
 
   return (
     <div className="layout">
       <div className={`sb-overlay ${sidebarOpen ? 'visible' : ''}`} onClick={() => setSidebarOpen(false)}></div>
 
-      <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''} ${sidebarOpen ? 'open' : ''}`}>
-        <div className="sb-logo">
-          <img src={logo} alt="Logo" />
-          <div>
-            <div className="sb-logo-name">SmokeDet System</div>
-            <div className="sb-logo-sub">{user.name} ({user.role})</div>
-          </div>
-          <button className="sb-collapse-btn" onClick={() => { const s = !sidebarCollapsed; setSidebarCollapsed(s); localStorage.setItem('sidebarCollapsed', s); }}>
-            <i className={`fa-solid ${sidebarCollapsed ? 'fa-chevron-right' : 'fa-chevron-left'}`}></i>
-          </button>
-        </div>
-        <nav className="sb-nav">
-          <div className="sb-section">Main</div>
-          <NavLink className="sb-item" to="/"><i className="fa-solid fa-gauge-high"></i><span className="sb-label">Dashboard</span></NavLink>
-          <NavLink className="sb-item" to="/analytics"><i className="fa-solid fa-chart-pie"></i><span className="sb-label">Analytics</span></NavLink>
-          {user.role === 'admin' && <NavLink className="sb-item" to="/admin"><i className="fa-solid fa-user-shield"></i><span className="sb-label">Admin Panel</span></NavLink>}
-          <div className="sb-section">Account</div>
-          <NavLink className="sb-item" to="/profile"><i className="fa-solid fa-circle-user"></i><span className="sb-label">Profile</span></NavLink>
-          <NavLink className="sb-item" to="/settings"><i className="fa-solid fa-sliders"></i><span className="sb-label">Settings</span></NavLink>
-          <div className="sb-section">System</div>
-          <NavLink className="sb-item" to="/logout"><i className="fa-solid fa-right-from-bracket"></i><span className="sb-label">Logout</span></NavLink>
-        </nav>
-      </aside>
+      <AppSidebar
+        user={user}
+        collapsed={sidebarCollapsed}
+        open={sidebarOpen}
+        onToggleCollapse={() => {
+          const s = !sidebarCollapsed;
+          setSidebarCollapsed(s);
+          localStorage.setItem('sidebarCollapsed', s);
+        }}
+      />
 
       <main className="main">
         <header className="top-bar">
@@ -471,7 +551,7 @@ const Settings = () => {
                 <div className="sov-card-sub">{alertCooldown}s cooldown</div>
               </div>
             </div>
-            {user.role === 'admin' ? (
+            {isStaff(user) ? (
               <div className="sov-card">
                 <div className="sov-card-icon" style={{ background: 'rgba(139,92,246,0.12)', color: 'var(--purple)' }}>
                   <i className="fa-solid fa-crosshairs"></i>
@@ -547,11 +627,13 @@ const Settings = () => {
                         <div className="profile-hero-stat-label">Online</div>
                       </div>
                       <div className="profile-hero-stat">
-                        <div className="profile-hero-stat-val">2025</div>
+                        <div className="profile-hero-stat-val">{memberSince}</div>
                         <div className="profile-hero-stat-label">Since</div>
                       </div>
                       <div className="profile-hero-stat">
-                        <div className="profile-hero-stat-val">{user.role === 'admin' ? 'Full' : 'View'}</div>
+                        <div className="profile-hero-stat-val">
+                          {isSupervisor(user) ? 'Supervisor' : isElevatedStaff(user) ? 'Admin' : isStaff(user) ? 'Manager' : 'User'}
+                        </div>
                         <div className="profile-hero-stat-label">Access</div>
                       </div>
                     </div>
@@ -617,8 +699,8 @@ const Settings = () => {
                       </div>
                     </div>
                   )}
-                  <SRow icon="fa-key" iconBg="rgba(16,185,129,0.1)" iconColor="var(--green)" label="Login Notifications" desc="Get an email alert whenever a new session is started with your account">
-                    <Toggle checked={loginNotif} onChange={setLoginNotif} />
+                  <SRow icon="fa-key" iconBg="rgba(16,185,129,0.1)" iconColor="var(--green)" label="Login Notifications" desc="Email on every sign-in (including yours) with IP, OS, browser, and time">
+                    <Toggle checked={loginNotif} onChange={handleLoginNotifChange} />
                   </SRow>
                   <div style={{ color: 'var(--tx3)', fontSize: '12px', marginTop: '-6px', marginBottom: '6px' }}>
                     Last notification: {lastLoginNotificationAt ? new Date(parseInt(lastLoginNotificationAt, 10)).toLocaleString() : 'Never'}
@@ -813,7 +895,7 @@ const Settings = () => {
                     </div>
                   </div>
 
-                  {user.role === 'admin' && (
+                  {isStaff(user) && (
                     <>
                       <div className="section-hdr mt-4 mb-3"><i className="fa-solid fa-server me-2"></i>SMTP Configuration</div>
                       <div className="row g-3 mb-3">
@@ -1101,17 +1183,6 @@ const Settings = () => {
                 </div>
                 <div className="c-body">
                   <div className="danger-action">
-                    <div className="danger-action-icon"><i className="fa-solid fa-trash-can"></i></div>
-                    <div className="danger-action-body">
-                      <div className="danger-action-title">Clear Violation History</div>
-                      <div className="danger-action-desc">Permanently delete all violation records and saved images from the database. This cannot be undone.</div>
-                    </div>
-                    <button className="btn-danger-outline" onClick={clearHistory}>
-                      <i className="fa-solid fa-trash me-1"></i>Clear History
-                    </button>
-                  </div>
-
-                  <div className="danger-action">
                     <div className="danger-action-icon"><i className="fa-solid fa-arrow-rotate-left"></i></div>
                     <div className="danger-action-body">
                       <div className="danger-action-title">Reset All Settings</div>
@@ -1274,6 +1345,78 @@ const Settings = () => {
                     ) : (
                       <><i className="fa-solid fa-circle-check me-2"></i>Verify & Enable</>
                     )}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showDisable2FAModal && (
+        <div style={{
+          position: 'fixed',
+          top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0, 0, 0, 0.65)',
+          backdropFilter: 'blur(10px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 9999,
+          padding: '20px'
+        }}>
+          <div className="c stagger-1" style={{
+            width: '100%',
+            maxWidth: '420px',
+            background: 'var(--card)',
+            border: '1px solid var(--border)',
+            borderRadius: '16px',
+            boxShadow: '0 20px 45px rgba(0,0,0,0.4)',
+            overflow: 'hidden'
+          }}>
+            <div className="c-head" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 20px', borderBottom: '1px solid var(--border)' }}>
+              <div className="c-title" style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '15px' }}>
+                <i className="fa-solid fa-envelope" style={{ color: 'var(--red)' }}></i>Disable 2FA
+              </div>
+              <button type="button" onClick={closeDisable2FAModal} style={{ background: 'none', border: 'none', color: 'var(--tx3)', cursor: 'pointer', fontSize: '18px' }}>
+                <i className="fa-solid fa-xmark"></i>
+              </button>
+            </div>
+            <div className="c-body" style={{ padding: '20px' }}>
+              <p style={{ fontSize: '13px', color: 'var(--tx2)', marginBottom: '16px', lineHeight: 1.5 }}>
+                For security, we emailed a 6-digit code to <strong>{user.email}</strong>. Enter it below to turn off two-factor authentication.
+              </p>
+              {disable2FAInfo && (
+                <div className="auth-info-msg mb-3">{disable2FAInfo}</div>
+              )}
+              {disable2FAError && (
+                <div className="error-msg show mb-3" style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 12px', borderRadius: '8px', fontSize: '12px' }}>
+                  <i className="fa-solid fa-circle-exclamation"></i>
+                  <span>{disable2FAError}</span>
+                </div>
+              )}
+              <form onSubmit={confirmDisable2FA}>
+                <div className="fgroup mb-3">
+                  <label className="flabel">Email verification code</label>
+                  <input
+                    className="finput supervisor-totp-input"
+                    inputMode="numeric"
+                    maxLength={6}
+                    placeholder="000000"
+                    value={disable2FACode}
+                    onChange={(e) => setDisable2FACode(normalizeTotpInput(e.target.value))}
+                    required
+                  />
+                </div>
+                <button type="button" className="btn-ghost btn-sm w-100 mb-3" onClick={sendDisable2FACode} disabled={disabling2FA}>
+                  {disabling2FA ? 'Sending…' : 'Resend code'}
+                </button>
+                <div style={{ display: 'flex', gap: '10px' }}>
+                  <button type="button" className="btn-w btn-flex w-100" onClick={closeDisable2FAModal} style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', cursor: 'pointer', height: '40px', borderRadius: '8px' }}>
+                    Cancel
+                  </button>
+                  <button type="submit" className="btn-r btn-flex w-100" disabled={disabling2FA || !disable2FACodeSent} style={{ background: 'var(--red)', borderColor: 'var(--red)', color: 'white', cursor: 'pointer', height: '40px', borderRadius: '8px' }}>
+                    {disabling2FA ? <><i className="fa-solid fa-spinner fa-spin me-2"></i>Disabling…</> : 'Disable 2FA'}
                   </button>
                 </div>
               </form>
