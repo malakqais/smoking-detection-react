@@ -6,7 +6,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 import cv2
 from ultralytics import YOLO
-from database import insert_violation, get_user_email, get_app_setting, get_user_id_by_label
+from database import insert_violation, get_user_email, get_user_email_by_id, get_app_setting, get_user_id_by_label, resolve_user_by_name
 from email_service import send_violation_email
 from config import (
     ALERT_COOLDOWN_SECONDS,
@@ -413,17 +413,24 @@ def _process_candidates(candidates, person_box, draw_payloads, state):
     detected_cls, conf, culprit_box, violation_summary = state
     smoke_present = 'smoke' in candidates
     tobacco_present = 'cigarette' in candidates or 'vape' in candidates
+    
+    # Check if smoke detection is active in settings and models
+    smoke_enabled = _detection_settings.get('enabled_classes', {}).get('smoke', True) and 'smoke' in _models
+    
     corroborated = (
         smoke_present
         and tobacco_present
         and _tobacco_smoke_spatially_linked(candidates, person_box)
     )
 
-    if corroborated:
+    # If corroborated, or if we have tobacco but smoke detection is disabled by user
+    if corroborated or (tobacco_present and not smoke_enabled):
         combo_conf = 0.0
         combo_cls = None
         for cls_name in ('cigarette', 'vape', 'smoke'):
             if cls_name not in candidates:
+                continue
+            if cls_name == 'smoke' and not smoke_enabled:
                 continue
             c, gx1, gy1, gx2, gy2 = candidates[cls_name]
             draw_payloads.append({
@@ -657,14 +664,37 @@ def _detection_loop(camera_index, location):
         rel_path = f"static/images/{img_filename}"
 
         person_name = "Unknown"
+        resolved_uid = None
+        resolved_email = None
+
         face_results = _predict('face', frame, conf=0.55)
         for r in face_results:
-            if len(r.boxes) > 0:
-                person_name = "Person Detected"
+            for box in r.boxes:
+                fx1, fy1, fx2, fy2 = map(int, box.xyxy[0])
+                h, w = frame.shape[:2]
+                fx1, fy1 = max(0, fx1), max(0, fy1)
+                fx2, fy2 = min(w, fx2), min(h, fy2)
+                if fx2 > fx1 and fy2 > fy1:
+                    face_crop = frame[fy1:fy2, fx1:fx2]
+                    matched_name = recognize_face(face_crop)
+                    if matched_name:
+                        uid, email = resolve_user_by_name(matched_name)
+                        if uid:
+                            person_name = matched_name
+                            resolved_uid = uid
+                            resolved_email = email
+                            break
+            if resolved_uid:
                 break
 
+        if person_name == "Unknown":
+            for r in face_results:
+                if len(r.boxes) > 0:
+                    person_name = "Person Detected"
+                    break
+
         log_type = (violation_summary or pending_cls or 'unknown').lower()
-        insert_violation(timestamp, rel_path, person_name, location, detected_type=log_type)
+        insert_violation(timestamp, rel_path, person_name, location, detected_type=log_type, user_id=resolved_uid)
         print(f"[Detection] ✓ {pending_cls} ({conf:.0%}) confirmed at {location} — {timestamp}")
         _log_event(f"Violation confirmed: {pending_cls} at {location} ({conf:.0%})", "warn")
 
@@ -672,7 +702,7 @@ def _detection_loop(camera_index, location):
             email_cooldown = _detection_settings.get('alert_cooldown', ALERT_COOLDOWN)
             if (now - last_email_time).total_seconds() >= email_cooldown:
                 try:
-                    recipient = get_user_email(person_name) or get_app_setting("smtp_recipient", "admin@example.com")
+                    recipient = resolved_email or get_user_email(person_name) or get_app_setting("smtp_recipient", "admin@example.com")
                     send_violation_email(img_path, recipient, person_name, pending_cls, location, timestamp)
                     last_email_time = now
                 except Exception as e:
@@ -757,7 +787,9 @@ def process_user_frame(frame, username, location="Student Webcam", user_id=None)
 
                 if _detection_settings.get('email_alerts', True):
                     try:
-                        recipient = get_user_email(username) or get_app_setting("smtp_recipient", "admin@example.com")
+                        recipient = get_user_email_by_id(uid) if uid else None
+                        if not recipient:
+                            recipient = get_user_email(username) or get_app_setting("smtp_recipient", "admin@example.com")
                         send_violation_email(img_path, recipient, username, detected_cls, location, timestamp)
                     except Exception as e:
                         print(f"[Detection] Email failed: {e}")
@@ -823,6 +855,98 @@ def encode_stream_jpeg(frame, quality=None):
         [int(cv2.IMWRITE_JPEG_QUALITY), int(q), int(cv2.IMWRITE_JPEG_OPTIMIZE), 1],
     )
     return buf.tobytes() if ok else None
+
+
+import torch
+import numpy as np
+from facenet_pytorch import InceptionResnetV1
+
+_facenet_resnet = None
+_known_face_embeddings = {}
+
+def _load_facenet():
+    global _facenet_resnet
+    if _facenet_resnet is None:
+        try:
+            _facenet_resnet = InceptionResnetV1(pretrained='vggface2').eval()
+            print("[FaceNet] Pretrained model loaded successfully.", flush=True)
+        except Exception as e:
+            print(f"[FaceNet] Error loading model: {e}", flush=True)
+            _log_event(f"FaceNet failed to load: {e}", "error")
+
+def _preprocess_face_crop(crop):
+    crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+    resized = cv2.resize(crop_rgb, (160, 160))
+    normalized = (resized.astype(np.float32) - 127.5) / 128.0
+    tensor = torch.tensor(normalized).permute(2, 0, 1).unsqueeze(0)
+    return tensor
+
+def init_known_faces():
+    global _known_face_embeddings
+    if _known_face_embeddings:
+        return
+    _load_facenet()
+    if _facenet_resnet is None:
+        return
+    known_dir = os.path.join(BASE_DIR, "backend", "known_faces")
+    if not os.path.isdir(known_dir):
+        print(f"[FaceNet] Directory {known_dir} does not exist.", flush=True)
+        return
+    print("[FaceNet] Computing embeddings for known faces...", flush=True)
+    for filename in os.listdir(known_dir):
+        if not filename.lower().endswith(('.jpg', '.jpeg', '.png')):
+            continue
+        filepath = os.path.join(known_dir, filename)
+        name = os.path.splitext(filename)[0].capitalize()
+        img = cv2.imread(filepath)
+        if img is None:
+            continue
+        face_results = _predict('face', img, conf=0.50)
+        crop = img
+        for r in face_results:
+            if len(r.boxes) > 0:
+                box = r.boxes[0]
+                fx1, fy1, fx2, fy2 = map(int, box.xyxy[0])
+                h, w = img.shape[:2]
+                fx1, fy1 = max(0, fx1), max(0, fy1)
+                fx2, fy2 = min(w, fx2), min(h, fy2)
+                if fx2 > fx1 and fy2 > fy1:
+                    crop = img[fy1:fy2, fx1:fx2]
+                break
+        try:
+            tensor = _preprocess_face_crop(crop)
+            with torch.no_grad():
+                embedding = _facenet_resnet(tensor).squeeze(0).numpy()
+            _known_face_embeddings[name] = embedding
+            print(f"[FaceNet] Loaded known face: {name}", flush=True)
+        except Exception as e:
+            print(f"[FaceNet] Failed to load {name}: {e}", flush=True)
+
+def recognize_face(face_crop):
+    global _known_face_embeddings
+    if not _known_face_embeddings:
+        init_known_faces()
+    if not _known_face_embeddings or _facenet_resnet is None:
+        return None
+    try:
+        tensor = _preprocess_face_crop(face_crop)
+        with torch.no_grad():
+            emb = _facenet_resnet(tensor).squeeze(0).numpy()
+        best_name = None
+        best_dist = 999.0
+        for name, known_emb in _known_face_embeddings.items():
+            dist = np.linalg.norm(emb - known_emb)
+            print(f"[FaceNet] Distance to {name}: {dist:.3f}", flush=True)
+            if dist < best_dist:
+                best_dist = dist
+                best_name = name
+        if best_dist < 0.85:
+            print(f"[FaceNet] Recognized face as {best_name} (distance={best_dist:.3f})", flush=True)
+            return best_name
+    except Exception as e:
+        print(f"[FaceNet] Recognition error: {e}", flush=True)
+    return None
+
 
 
 _detection_active = False

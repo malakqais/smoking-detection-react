@@ -1112,8 +1112,8 @@ const Settings = () => {
                         <i className="fa-solid fa-video" style={{ color: cam.enabled ? 'var(--green)' : 'var(--tx3)' }}></i>
                       </div>
                       <div className="cam-row-card-body">
-                        <div className="row g-2">
-                          <div className="col-sm-5">
+                        <div className="row g-2 align-items-end">
+                          <div className="col-sm-4">
                             <label className="flabel" style={{ fontSize: '11px' }}>Camera Name</label>
                             <input
                               type="text"
@@ -1122,7 +1122,7 @@ const Settings = () => {
                               onChange={e => updateCamera(cam.id, 'name', e.target.value)}
                             />
                           </div>
-                          <div className="col-sm-5">
+                          <div className="col-sm-4">
                             <label className="flabel" style={{ fontSize: '11px' }}>Location Label</label>
                             <input
                               type="text"
@@ -1131,8 +1131,40 @@ const Settings = () => {
                               onChange={e => updateCamera(cam.id, 'location', e.target.value)}
                             />
                           </div>
-                          <div className="col-sm-2 d-flex align-items-end justify-content-end pb-1">
-                            <Toggle checked={cam.enabled} onChange={v => updateCamera(cam.id, 'enabled', v)} />
+                          <div className="col-sm-2 d-flex justify-content-center pb-1">
+                            <div className="d-flex flex-column align-items-center">
+                              <span style={{ fontSize: '10px', color: 'var(--tx3)', marginBottom: '4px' }}>Active</span>
+                              <Toggle checked={cam.enabled} onChange={v => updateCamera(cam.id, 'enabled', v)} />
+                            </div>
+                          </div>
+                          <div className="col-sm-2 d-flex justify-content-end pb-1">
+                            <button
+                              type="button"
+                              className="btn-r btn-sm"
+                              style={{
+                                height: '36px',
+                                width: '100%',
+                                padding: '0 8px',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                gap: '4px',
+                                background: 'rgba(239, 68, 68, 0.1)',
+                                color: 'var(--red)',
+                                border: '1px solid rgba(239, 68, 68, 0.2)',
+                                cursor: 'pointer',
+                                transition: 'all 0.2s ease'
+                              }}
+                              onClick={() => {
+                                const newCams = cameras.filter(c => c.id !== cam.id);
+                                setCameras(newCams);
+                                localStorage.setItem('cameras', JSON.stringify(newCams));
+                              }}
+                              title="Delete Camera"
+                            >
+                              <i className="fa-solid fa-trash-can"></i>
+                              <span className="d-sm-none d-md-inline">Delete</span>
+                            </button>
                           </div>
                         </div>
                       </div>
@@ -1141,7 +1173,8 @@ const Settings = () => {
                   <button
                     className="btn-ghost btn-sm mt-2"
                     onClick={() => {
-                      const newCams = [...cameras, { id: cameras.length, name: `Camera ${cameras.length}`, location: 'New Location', enabled: false }];
+                      const nextId = cameras.length > 0 ? Math.max(...cameras.map(c => c.id)) + 1 : 0;
+                      const newCams = [...cameras, { id: nextId, name: `Camera ${nextId}`, location: 'New Location', enabled: false }];
                       setCameras(newCams);
                       localStorage.setItem('cameras', JSON.stringify(newCams));
                     }}

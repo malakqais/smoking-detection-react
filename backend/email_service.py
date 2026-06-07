@@ -75,17 +75,16 @@ def send_violation_email(image_path, recipient_email, violator_name="Unknown", d
                 filename='violation_evidence.jpg'
             )
 
-        # Connect to Gmail SMTP with TLS encryption on port 587
-        with smtplib.SMTP('smtp.gmail.com', 587) as server:
-            server.starttls()
+        # Connect to Gmail SMTP with SSL encryption on port 465
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=5) as server:
             server.login(smtp_email, smtp_password)
             server.send_message(msg)
 
-        print(f"✅ Violation email sent successfully to {recipient_email} (violator: {violator_name})")
+        print(f"[SMTP] Violation email sent successfully to {recipient_email} (violator: {violator_name})")
         return True
 
     except Exception as e:
-        print(f"❌ Email Delivery Failed: {e}")
+        print(f"[SMTP] Email Delivery Failed: {e}")
         return False
 
 def send_test_email(recipient_email, smtp_email=None, smtp_app_password=None):
@@ -113,15 +112,14 @@ def send_test_email(recipient_email, smtp_email=None, smtp_app_password=None):
     msg.set_content(body)
 
     try:
-        with smtplib.SMTP('smtp.gmail.com', 587) as server:
-            server.starttls()
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=5) as server:
             server.login(test_email, test_password)
             server.send_message(msg)
 
-        print(f"✅ Test email sent successfully to {recipient_email}")
+        print(f"[SMTP] Test email sent successfully to {recipient_email}")
         return True
     except Exception as e:
-        print(f"❌ Test Email Delivery Failed: {e}")
+        print(f"[SMTP] Test Email Delivery Failed: {e}")
         return False
 
 
@@ -169,14 +167,13 @@ and enable two-factor authentication in Settings.
     msg.set_content(body.strip())
 
     try:
-        with smtplib.SMTP("smtp.gmail.com", 587) as server:
-            server.starttls()
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=5) as server:
             server.login(smtp_email, smtp_password)
             server.send_message(msg)
-        print(f"Login notification sent to {recipient_email} (IP {ip_address})")
+        print(f"[SMTP] Login notification sent to {recipient_email} (IP {ip_address})")
         return True
     except Exception as e:
-        print(f"Login notification email failed: {e}")
+        print(f"[SMTP] Login notification email failed: {e}")
         return False
 
 
@@ -205,12 +202,11 @@ If you did not request this, you can ignore this email.
     msg.set_content(body.strip())
 
     try:
-        with smtplib.SMTP("smtp.gmail.com", 587) as server:
-            server.starttls()
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=5) as server:
             server.login(smtp_email, smtp_password)
             server.send_message(msg)
-        print(f"✅ Security code email sent to {recipient_email} ({purpose_label})")
+        print(f"[SMTP] Security code email sent to {recipient_email} ({purpose_label})")
         return True
     except Exception as e:
-        print(f"❌ Security code email failed: {e}")
+        print(f"[SMTP] Security code email failed: {e}")
         return False

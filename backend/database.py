@@ -301,6 +301,18 @@ def get_user_email(name):
     return result[0] if result else None
 
 
+def get_user_email_by_id(uid):
+    if not uid:
+        return None
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute("SELECT email FROM users WHERE id = ?", (uid,))
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else None
+
+
+
 def get_app_setting(key, default=None):
     conn = _connect()
     cursor = conn.cursor()
@@ -320,3 +332,30 @@ def set_app_setting(key, value):
     )
     conn.commit()
     conn.close()
+
+
+def resolve_user_by_name(name):
+    if not name:
+        return None, None
+    conn = _connect()
+    # 1. Direct or case-insensitive match
+    row = conn.execute(
+        "SELECT id, email FROM users WHERE lower(name) = ? OR lower(email) = ? LIMIT 1",
+        (name.lower(), name.lower())
+    ).fetchone()
+    if row:
+        conn.close()
+        return row[0], row[1]
+
+    # 2. Smart handling of spelling variations (e.g. malak vs malek)
+    norm = name.lower().replace('e', 'a')
+    users = conn.execute("SELECT id, name, email FROM users").fetchall()
+    for uid, uname, uemail in users:
+        unorm = (uname or "").lower().replace('e', 'a')
+        if unorm == norm:
+            conn.close()
+            return uid, uemail
+
+    conn.close()
+    return None, None
+
