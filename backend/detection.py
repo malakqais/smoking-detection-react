@@ -17,6 +17,8 @@ from config import (
     TOBACCO_CONF_THRESHOLD,
     SMOKE_CONF_THRESHOLD,
     SMOKE_ONLY_VIOLATION_CONF,
+    SMOKE_TOBACCO_EXPAND_RATIO,
+    SMOKE_UPPER_BODY_FRAC,
     STREAM_JPEG_QUALITY,
     CAMERA_DETECT_EVERY_N,
     USER_DETECT_WORKERS,
@@ -24,6 +26,9 @@ from config import (
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_DIR = os.path.join(BASE_DIR, "VIRSION 1", "models")
+TOBACCO_MODEL_PATH = os.path.join(
+    BASE_DIR, "00_model_weights", "00_model_weights", "best_yolov8l_cigarette_vape_v2.pt"
+)
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "images")
 
 _threads = []
@@ -42,12 +47,14 @@ _user_frame_lock = threading.Lock()
 _user_frame_pending = {}
 _user_detect_executor = ThreadPoolExecutor(max_workers=USER_DETECT_WORKERS, thread_name_prefix='webcam-det')
 
+DEFAULT_CONF_THRESH_PCT = int(round(TOBACCO_CONF_THRESHOLD * 100))
+
 # Runtime-configurable settings (updated via API)
 _detection_settings = {
     'enabled_classes': {'cigarette': True, 'smoke': True, 'vape': True},
-    'conf_thresh': None,  # None = use hardcoded defaults per class
+    'conf_thresh': DEFAULT_CONF_THRESH_PCT,
     'email_alerts': True,
-    'alert_cooldown': ALERT_COOLDOWN_SECONDS,
+    'alert_cooldown': 60,
 }
 
 
@@ -97,7 +104,10 @@ def update_detection_settings(enabled_classes=None, conf_thresh=None, email_aler
 
 
 def get_detection_settings():
-    return dict(_detection_settings)
+    settings = dict(_detection_settings)
+    if settings.get('conf_thresh') is None:
+        settings['conf_thresh'] = DEFAULT_CONF_THRESH_PCT
+    return settings
 
 
 def _load_models():
@@ -107,12 +117,16 @@ def _load_models():
     from gpu_runtime import device_for_model, gpu_status, use_fp16, warmup_model
 
     paths = {
-        'person':    os.path.join(BASE_DIR, "VIRSION 1", "yolov8n.pt"),
-        'cigarette': os.path.join(MODEL_DIR, "cigarette_best1.pt"),
-        'smoke':     os.path.join(MODEL_DIR, "smoke_best.pt"),
-        'vape':      os.path.join(MODEL_DIR, "vape_best.pt"),
-        'face':      os.path.join(MODEL_DIR, "face_best.pt"),
+        'person':         os.path.join(BASE_DIR, "VIRSION 1", "yolov8n.pt"),
+        'cigarette_vape': TOBACCO_MODEL_PATH,
+        'face':           os.path.join(MODEL_DIR, "face_best.pt"),
     }
+    smoke_path = os.path.join(MODEL_DIR, "smoke_best.pt")
+    if os.path.isfile(smoke_path):
+        paths['smoke'] = smoke_path
+    else:
+        print(f"[Detection] smoke_best.pt not found — tobacco violations require smoke corroboration but smoke model is unavailable")
+        _log_event("smoke_best.pt missing — enable smoke model file for corroborated tobacco alerts", "warn")
     _models = {}
     for key, path in paths.items():
         dev = device_for_model(key)
@@ -189,6 +203,69 @@ def _is_candidate_size_valid(cls_name, rel_h, rel_w):
     return True
 
 
+def _box_intersection_area(box_a, box_b):
+    ax1, ay1, ax2, ay2 = box_a
+    bx1, by1, bx2, by2 = box_b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    if ix2 <= ix1 or iy2 <= iy1:
+        return 0
+    return (ix2 - ix1) * (iy2 - iy1)
+
+
+def _smoke_corroborates_tobacco(tobacco_box, smoke_box, expand_ratio=None):
+    """Loose zone around the object — smoke often appears above/near mouth, not on the bbox."""
+    if expand_ratio is None:
+        expand_ratio = SMOKE_TOBACCO_EXPAND_RATIO
+    tx1, ty1, tx2, ty2 = tobacco_box
+    tw = max(1, tx2 - tx1)
+    th = max(1, ty2 - ty1)
+    pad_side = int(tw * expand_ratio * 0.85)
+    pad_up = int(th * expand_ratio * 1.35)
+    pad_down = int(th * expand_ratio * 0.45)
+    expanded = (tx1 - pad_side, ty1 - pad_up, tx2 + pad_side, ty2 + pad_down)
+
+    scx = (smoke_box[0] + smoke_box[2]) / 2
+    scy = (smoke_box[1] + smoke_box[3]) / 2
+    if expanded[0] <= scx <= expanded[2] and expanded[1] <= scy <= expanded[3]:
+        return True
+    return _box_intersection_area(expanded, smoke_box) > 0
+
+
+def _person_upper_body_zone(person_box):
+    px1, py1, px2, py2 = person_box
+    pw = max(1, px2 - px1)
+    ph = max(1, py2 - py1)
+    pad_x = int(pw * 0.12)
+    upper_y2 = py1 + int(ph * SMOKE_UPPER_BODY_FRAC)
+    return (px1 - pad_x, py1, px2 + pad_x, upper_y2)
+
+
+def _smoke_in_zone(smoke_box, zone):
+    scx = (smoke_box[0] + smoke_box[2]) / 2
+    scy = (smoke_box[1] + smoke_box[3]) / 2
+    if zone[0] <= scx <= zone[2] and zone[1] <= scy <= zone[3]:
+        return True
+    return _box_intersection_area(smoke_box, zone) > 0
+
+
+def _tobacco_smoke_spatially_linked(candidates, person_box=None):
+    if 'smoke' not in candidates:
+        return False
+    smoke_box = candidates['smoke'][1:]
+    tobacco_present = 'cigarette' in candidates or 'vape' in candidates
+    if not tobacco_present:
+        return False
+
+    for cls_name in ('cigarette', 'vape'):
+        if cls_name in candidates and _smoke_corroborates_tobacco(candidates[cls_name][1:], smoke_box):
+            return True
+
+    if person_box is not None and _smoke_in_zone(smoke_box, _person_upper_body_zone(person_box)):
+        return True
+    return False
+
+
 def _iter_person_boxes(frame):
     person_results = _predict('person', frame, classes=[0], conf=PERSON_CONF_THRESHOLD)
     boxes = []
@@ -212,40 +289,62 @@ def _compute_person_crop(frame_shape, person_box, pad_ratio=None):
     return x1_crop, y1_crop, x2_crop, y2_crop
 
 
+def _add_detection_candidate(candidates, cls_name, c, cx1, cy1, cx2, cy2, crop_h, crop_w, override_thresh):
+    current_threshold = _class_threshold(cls_name, override_thresh)
+    if c < current_threshold:
+        return
+    obj_w = cx2 - cx1
+    obj_h = cy2 - cy1
+    rel_h = obj_h / crop_h
+    rel_w = obj_w / crop_w
+    if not _is_candidate_size_valid(cls_name, rel_h, rel_w):
+        return
+    if cls_name not in candidates or c > candidates[cls_name][0]:
+        candidates[cls_name] = (c, cx1, cy1, cx2, cy2)
+
+
 def _collect_candidates(crop):
     candidates = {}  # cls_name -> (conf, cx1, cy1, cx2, cy2)
     enabled = _detection_settings['enabled_classes']
     override_thresh = _detection_settings['conf_thresh']
+    crop_h, crop_w, _ = crop.shape
 
-    for cls_name in ('cigarette', 'smoke', 'vape'):
-        if not enabled.get(cls_name, True):
-            continue
-        if cls_name not in _models:
-            continue
-
-        current_threshold = _class_threshold(cls_name, override_thresh)
+    tobacco_enabled = enabled.get('cigarette', True) or enabled.get('vape', True)
+    if tobacco_enabled:
         results = _predict(
-            cls_name,
+            'cigarette_vape',
             crop,
-            conf=_yolo_infer_conf(cls_name),
+            conf=min(YOLO_INFER_CONF, 0.22),
             imgsz=640,
         )
-        crop_h, crop_w, _ = crop.shape
+        for r in results:
+            for box in r.boxes:
+                cls_id = int(box.cls[0])
+                cls_name = r.names.get(cls_id, '')
+                if cls_name not in ('cigarette', 'vape'):
+                    continue
+                if not enabled.get(cls_name, True):
+                    continue
+                c = float(box.conf[0])
+                cx1, cy1, cx2, cy2 = map(int, box.xyxy[0])
+                _add_detection_candidate(
+                    candidates, cls_name, c, cx1, cy1, cx2, cy2, crop_h, crop_w, override_thresh
+                )
 
+    if enabled.get('smoke', True) and 'smoke' in _models:
+        results = _predict(
+            'smoke',
+            crop,
+            conf=_yolo_infer_conf('smoke'),
+            imgsz=640,
+        )
         for r in results:
             for box in r.boxes:
                 c = float(box.conf[0])
-                if c < current_threshold:
-                    continue
                 cx1, cy1, cx2, cy2 = map(int, box.xyxy[0])
-                obj_w = cx2 - cx1
-                obj_h = cy2 - cy1
-                rel_h = obj_h / crop_h
-                rel_w = obj_w / crop_w
-                if not _is_candidate_size_valid(cls_name, rel_h, rel_w):
-                    continue
-                if cls_name not in candidates or c > candidates[cls_name][0]:
-                    candidates[cls_name] = (c, cx1, cy1, cx2, cy2)
+                _add_detection_candidate(
+                    candidates, 'smoke', c, cx1, cy1, cx2, cy2, crop_h, crop_w, override_thresh
+                )
     return candidates
 
 
@@ -314,11 +413,18 @@ def _process_candidates(candidates, person_box, draw_payloads, state):
     detected_cls, conf, culprit_box, violation_summary = state
     smoke_present = 'smoke' in candidates
     tobacco_present = 'cigarette' in candidates or 'vape' in candidates
+    corroborated = (
+        smoke_present
+        and tobacco_present
+        and _tobacco_smoke_spatially_linked(candidates, person_box)
+    )
 
-    if smoke_present and tobacco_present:
+    if corroborated:
         combo_conf = 0.0
         combo_cls = None
         for cls_name in ('cigarette', 'vape', 'smoke'):
+            if cls_name not in candidates:
+                continue
             c, gx1, gy1, gx2, gy2 = candidates[cls_name]
             draw_payloads.append({
                 'kind': 'violation_object',
@@ -340,7 +446,14 @@ def _process_candidates(candidates, person_box, draw_payloads, state):
             c, gx1, gy1, gx2, gy2 = candidates[cls_name]
             draw_payloads.append({
                 'kind': 'cigarette_only',
-                'label': f"{cls_name.upper()} {c:.0%}",
+                'label': f"SUSPECT {cls_name.upper()} {c:.0%}",
+                'box': (gx1, gy1, gx2, gy2),
+            })
+        if smoke_present:
+            c, gx1, gy1, gx2, gy2 = candidates['smoke']
+            draw_payloads.append({
+                'kind': 'cigarette_only',
+                'label': f"SMOKE {c:.0%} (away from face)",
                 'box': (gx1, gy1, gx2, gy2),
             })
     elif smoke_present:
@@ -555,13 +668,15 @@ def _detection_loop(camera_index, location):
         print(f"[Detection] ✓ {pending_cls} ({conf:.0%}) confirmed at {location} — {timestamp}")
         _log_event(f"Violation confirmed: {pending_cls} at {location} ({conf:.0%})", "warn")
 
-        if _detection_settings.get('email_alerts', True) and (now - last_email_time).total_seconds() > 60:
-            try:
-                recipient = get_user_email(person_name) or get_app_setting("smtp_recipient", "admin@example.com")
-                send_violation_email(img_path, recipient, person_name, pending_cls, location, timestamp)
-                last_email_time = now
-            except Exception as e:
-                print(f"[Detection] Email failed: {e}")
+        if _detection_settings.get('email_alerts', True):
+            email_cooldown = _detection_settings.get('alert_cooldown', ALERT_COOLDOWN)
+            if (now - last_email_time).total_seconds() >= email_cooldown:
+                try:
+                    recipient = get_user_email(person_name) or get_app_setting("smtp_recipient", "admin@example.com")
+                    send_violation_email(img_path, recipient, person_name, pending_cls, location, timestamp)
+                    last_email_time = now
+                except Exception as e:
+                    print(f"[Detection] Email failed: {e}")
 
     cam.stop()
     print(f"[Detection] Stopped on camera {camera_index}")
@@ -569,8 +684,9 @@ def _detection_loop(camera_index, location):
 
 
 _user_cooldowns = {}
+_user_confirm_state = {}
 
-def process_user_frame(frame, username, location="Student Webcam"):
+def process_user_frame(frame, username, location="Student Webcam", user_id=None):
     _load_models()
     annotated_frame = frame.copy()
     analysis = _analyze_frame(frame)
@@ -605,36 +721,49 @@ def process_user_frame(frame, username, location="Student Webcam"):
                 2
             )
 
-    # Cooldown & log writing
+    publish_user_stream_frame(username, annotated_frame)
+
     if detected_cls:
-        global _user_cooldowns
-        now = datetime.datetime.now()
-        last_t = _user_cooldowns.get(username, datetime.datetime.min)
-        if (now - last_t).total_seconds() >= 10.0:  # 10s cooldown per user to prevent duplicate fine logging
-            _user_cooldowns[username] = now
-            
-            timestamp = now.strftime("%Y-%m-%d %H-%M-%S")
-            img_filename = f"user_{username.replace(' ', '_')}_{timestamp}.jpg"
-            img_path = os.path.join(STATIC_DIR, img_filename)
-            cv2.imwrite(img_path, frame)
-            rel_path = f"static/images/{img_filename}"
-            
-            log_type = (violation_summary or detected_cls or 'unknown').lower()
-            uid = get_user_id_by_label(username)
-            insert_violation(
-                timestamp, rel_path, username, location,
-                detected_type=log_type, user_id=uid,
-            )
-            print(f"[AI Multi-Stream] VIOLATION LOGGED: user {username} caught with {detected_cls} on webcam")
-            _log_event(f"Webcam violation: {username} with {detected_cls} at {location}", "warn")
-            
-            if _detection_settings.get('email_alerts', True):
-                try:
-                    recipient = get_user_email(username) or get_app_setting("smtp_recipient", "admin@example.com")
-                    send_violation_email(img_path, recipient, username, detected_cls, location, timestamp)
-                except Exception as e:
-                    print(f"[Detection] Email failed: {e}")
-                
+        global _user_cooldowns, _user_confirm_state
+        state = _user_confirm_state.setdefault(username, {'cls': None, 'consecutive': 0})
+        if detected_cls == state['cls']:
+            state['consecutive'] += 1
+        else:
+            state['cls'] = detected_cls
+            state['consecutive'] = 1
+
+        if state['consecutive'] >= CONFIRM_FRAMES:
+            now = datetime.datetime.now()
+            last_t = _user_cooldowns.get(username, datetime.datetime.min)
+            current_cooldown = _detection_settings.get('alert_cooldown', ALERT_COOLDOWN)
+            if (now - last_t).total_seconds() >= current_cooldown:
+                _user_cooldowns[username] = now
+                state['consecutive'] = 0
+
+                timestamp = now.strftime("%Y-%m-%d %H-%M-%S")
+                img_filename = f"user_{username.replace(' ', '_')}_{timestamp}.jpg"
+                img_path = os.path.join(STATIC_DIR, img_filename)
+                cv2.imwrite(img_path, annotated_frame)
+                rel_path = f"static/images/{img_filename}"
+
+                uid = user_id or get_user_id_by_label(username)
+                log_type = (violation_summary or detected_cls or 'unknown').lower()
+                insert_violation(
+                    timestamp, rel_path, username, location,
+                    detected_type=log_type, user_id=uid,
+                )
+                print(f"[AI Multi-Stream] VIOLATION LOGGED: user {username} (uid={uid}) — {detected_cls} at {location}")
+                _log_event(f"Webcam violation: {username} with {detected_cls} at {location}", "warn")
+
+                if _detection_settings.get('email_alerts', True):
+                    try:
+                        recipient = get_user_email(username) or get_app_setting("smtp_recipient", "admin@example.com")
+                        send_violation_email(img_path, recipient, username, detected_cls, location, timestamp)
+                    except Exception as e:
+                        print(f"[Detection] Email failed: {e}")
+    else:
+        _user_confirm_state[username] = {'cls': None, 'consecutive': 0}
+
     return annotated_frame, detected_cls is not None
 
 
@@ -652,17 +781,17 @@ def _drain_user_detection(username):
             pending = _user_frame_pending.pop(username, None)
         if pending is None:
             return
-        frame, location = pending
+        frame, location, user_id = pending
         try:
-            process_user_frame(frame, username, location)
+            process_user_frame(frame, username, location, user_id=user_id)
         except Exception as exc:
             print(f"[Webcam] Detection error for {username}: {exc}")
 
 
-def queue_user_stream_detection(username, frame, location="Student Webcam"):
+def queue_user_stream_detection(username, frame, location="Student Webcam", user_id=None):
     """Run YOLO on a copy in the background; always keeps only the newest pending frame."""
     with _user_frame_lock:
-        _user_frame_pending[username] = (frame.copy(), location)
+        _user_frame_pending[username] = (frame.copy(), location, user_id)
     _user_detect_executor.submit(_drain_user_detection, username)
 
 
@@ -676,7 +805,7 @@ def get_user_stream_seq(username):
         return _user_frame_seq.get(username, 0)
 
 
-def list_active_user_streams(max_age_seconds=30.0):
+def list_active_user_streams(max_age_seconds=60.0):
     now = datetime.datetime.now()
     active = []
     with _user_frame_lock:

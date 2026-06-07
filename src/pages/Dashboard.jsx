@@ -13,6 +13,7 @@ import {
 } from 'chart.js';
 import logo from '../assets/LOGO.png';
 import { playAlarmTone } from '../utils/alarmTone';
+import { getAlertCooldownSeconds, getWebcamUploadFps, isWebcamAutoCaptureEnabled } from '../utils/clientSettings.js';
 import KpiCards from '../components/dashboard/KpiCards';
 import AiLogsPanel from '../components/dashboard/AiLogsPanel';
 import CameraGrid from '../components/dashboard/CameraGrid';
@@ -98,8 +99,8 @@ const Dashboard = () => {
     canvas.height = 480;
     studentCanvasRef.current = canvas;
 
-    const autoCapture = localStorage.getItem('autoCapture') !== 'false';
-    const uploadFps = Math.min(60, Math.max(15, Number(localStorage.getItem('throttle') || 30)));
+    const autoCapture = isWebcamAutoCaptureEnabled();
+    const uploadFps = getWebcamUploadFps();
     const minUploadGapMs = Math.round(1000 / uploadFps);
     let lastUploadAt = 0;
 
@@ -195,13 +196,12 @@ const Dashboard = () => {
       if (res.ok) {
         const data = await res.json();
         setViolations(data);
-        const userSpecific = data.filter(v => 
-          v.name && v.name.toLowerCase() === user.name.toLowerCase()
-        );
-        setMyViolations(userSpecific);
+        if (!isStaff(user)) {
+          setMyViolations(data);
+        }
         if (data.length > prevCount.current && prevCount.current > 0) {
           const soundEnabled = localStorage.getItem('soundAlerts') !== 'false';
-          const cooldownSeconds = Math.max(1, Number(localStorage.getItem('alertCooldown') || 60));
+          const cooldownSeconds = getAlertCooldownSeconds();
           const nowMs = Date.now();
           if (soundEnabled) {
             if (nowMs - lastSoundAlertRef.current >= cooldownSeconds * 1000) {
@@ -308,28 +308,33 @@ const Dashboard = () => {
   const locations = useMemo(() => [...new Set(violations.map(v => v.location).filter(Boolean))], [violations]);
 
   const activeCams = useMemo(() => {
-    if (isStaff(user) && activeWebcamUsers.length > 0) {
-      return activeWebcamUsers.map((username, i) => ({
-        name: `${username}'s Workspace`,
-        cam: `Webcam Feed`,
-        active: true,
-        isWebcam: true,
-        userRef: username
-      }));
-    }
-
     const stored = JSON.parse(localStorage.getItem('cameras')) || [
       { id: 0, name: 'Camera 0', location: 'Main Lobby', enabled: true },
       { id: 1, name: 'Camera 1', location: 'Parking Area', enabled: false },
       { id: 2, name: 'Camera 2', location: 'Cafeteria', enabled: false }
     ];
-    return stored.map(c => ({
+
+    const webcamTiles = isStaff(user) && detectionRunning
+      ? activeWebcamUsers.map((username) => ({
+          name: `${username}'s Webcam`,
+          cam: 'Student live feed',
+          active: true,
+          isWebcam: true,
+          userRef: username,
+          feedId: null,
+        }))
+      : [];
+
+    const physicalTiles = stored.map((c) => ({
       name: c.location,
       cam: c.name,
       active: detectionRunning && c.enabled,
       isWebcam: false,
-      userRef: null
+      userRef: null,
+      feedId: c.id,
     }));
+
+    return [...webcamTiles, ...physicalTiles];
   }, [detectionRunning, activeWebcamUsers, user.role]);
 
   const filteredViolations = useMemo(() => {
@@ -441,20 +446,27 @@ const Dashboard = () => {
 
   /* ── USER VIEW ─────────────────────────────────────────────── */
   if (!isStaff(user)) {
-    const unpaidFine = myViolations.length * 20;
-    const MONITORED_ZONES = activeCams.map(c => c.name);
+    const unpaidViolations = myViolations.filter((v) => !v.paid);
+    const unpaidFine = unpaidViolations.length * 20;
+    const MONITORED_ZONES = activeCams.filter((c) => c.active).map((c) => c.name);
 
-    const handlePaySubmit = (e) => {
+    const handlePaySubmit = async (e) => {
       e.preventDefault();
       setPaying(true);
-      setTimeout(() => {
+      try {
+        const res = await apiFetch('/api/violations/pay', { method: 'POST', body: JSON.stringify({}) });
+        if (res.ok) {
+          await fetchViolations();
+          setShowPayModal(false);
+          setCardNumber('');
+          setCardExpiry('');
+          setCardCVC('');
+        }
+      } catch {
+        /* keep modal open */
+      } finally {
         setPaying(false);
-        setShowPayModal(false);
-        setMyViolations([]);
-        setCardNumber("");
-        setCardExpiry("");
-        setCardCVC("");
-      }, 2000);
+      }
     };
 
 
@@ -564,8 +576,8 @@ const Dashboard = () => {
                           </div>
                         </div>
                         <div style={{ textAlign: 'right' }}>
-                          <div style={{ fontWeight: 700, color: 'var(--red)', fontSize: 14 }}>$20.00</div>
-                          <span className="tag r" style={{ fontSize: 10, padding: '2px 6px' }}>Unresolved</span>
+                          <div style={{ fontWeight: 700, color: v.paid ? 'var(--green)' : 'var(--red)', fontSize: 14 }}>$20.00</div>
+                          <span className={`tag ${v.paid ? 'g' : 'r'}`} style={{ fontSize: 10, padding: '2px 6px' }}>{v.paid ? 'Paid' : 'Unpaid'}</span>
                         </div>
                       </div>
                     ))
@@ -907,6 +919,21 @@ const Dashboard = () => {
 
             <AiLogsPanel aiLogs={aiLogs} detectionRunning={detectionRunning} />
           </div>
+
+          {isStaff(user) && detectionRunning && activeWebcamUsers.length === 0 && (
+            <div className="mb-4" style={{
+              display: 'flex', alignItems: 'flex-start', gap: '12px',
+              background: 'rgba(59,130,246,0.08)', border: '1px solid rgba(59,130,246,0.3)',
+              borderRadius: '12px', padding: '14px 16px',
+            }}>
+              <i className="fa-solid fa-circle-info" style={{ color: 'var(--blue)', marginTop: '2px' }}></i>
+              <div style={{ fontSize: '13px', color: 'var(--tx2)', lineHeight: 1.55 }}>
+                <strong style={{ color: 'var(--tx1)' }}>Waiting for student webcam feeds.</strong>{' '}
+                A student must log in on Dashboard (use a separate browser or incognito window), allow camera access,
+                and keep this page open while detection is running. Staff accounts do not upload webcam frames.
+              </div>
+            </div>
+          )}
 
           <CameraGrid
             activeCams={activeCams}

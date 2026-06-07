@@ -8,6 +8,7 @@ import { useCurrentUser } from '../hooks/useCurrentUser.js';
 import AppSidebar from '../components/layout/AppSidebar.jsx';
 import { playAlarmTone } from '../utils/alarmTone';
 import { useLocalStorage } from '../components/useLocalStorage';
+import { applyAccentColor, DEFAULT_WEBCAM_FPS, loadAccentColor } from '../utils/clientSettings.js';
 import { isValidTotpCode, normalizeTotpInput } from '../utils/totp.js';
 
 const NAV = [
@@ -29,11 +30,17 @@ const ACCENT_COLORS = [
   { name: 'Pink',   val: '#ec4899' },
 ];
 
-const MODELS = [
-  { name: 'cigarette_best1.pt', label: 'Cigarette',  color: '#ef4444' },
-  { name: 'smoke_best.pt',      label: 'Smoke',      color: '#94a3b8' },
-  { name: 'vape_best.pt',       label: 'Vape',       color: '#8b5cf6' },
-  { name: 'face_best.pt',       label: 'Face ID',    color: '#3b82f6' },
+const LOADED_MODELS = [
+  { name: 'yolov8n.pt', label: 'Person', color: '#10b981' },
+  { name: 'best_yolov8l_cigarette_vape_v2.pt', label: 'Cigarette & Vape', color: '#ef4444' },
+  { name: 'smoke_best.pt', label: 'Smoke (corroboration)', color: '#94a3b8' },
+  { name: 'face_best.pt', label: 'Face ID', color: '#3b82f6' },
+];
+
+const DETECTION_CLASSES = [
+  { key: 'cigarette', label: 'Cigarette', color: '#ef4444', model: 'best_yolov8l_cigarette_vape_v2.pt' },
+  { key: 'vape', label: 'Vape', color: '#8b5cf6', model: 'best_yolov8l_cigarette_vape_v2.pt' },
+  { key: 'smoke', label: 'Smoke', color: '#94a3b8', model: 'smoke_best.pt' },
 ];
 
 function formatMemberSince(createdAt) {
@@ -92,11 +99,10 @@ const Settings = () => {
 
   // Appearance (theme is already in state above)
 
-  // Notifications
-  const [emailAlerts, setEmailAlerts] = useLocalStorage('emailAlerts', true);
+  // Notifications (client-side sound; email/cooldown synced to backend for staff)
   const [soundAlerts, setSoundAlerts] = useLocalStorage('soundAlerts', true);
   const [alarmTone, setAlarmTone] = useLocalStorage('alarmTone', 'high_beep');
-  const [alertCooldown, setAlertCooldown] = useLocalStorage('alertCooldown', 60);
+  const [accentColor, setAccentColor] = useState(() => loadAccentColor() || '#ef4444');
   const [smtpSender, setSmtpSender] = useState('');
   const [smtpAppPass, setSmtpAppPass] = useState('');
   const [smtpRecipient, setSmtpRecipient] = useState(user.email);
@@ -105,9 +111,21 @@ const Settings = () => {
   const [smtpPasswordSet, setSmtpPasswordSet] = useState(false);
 
   // Detection
-  const [throttle, setThrottle] = useLocalStorage('throttle', 60);
+  const [throttle, setThrottle] = useLocalStorage('throttle', DEFAULT_WEBCAM_FPS);
   const [autoCapture, setAutoCapture] = useLocalStorage('autoCapture', true);
-  const { confThresh, setConfThresh, enabledClasses, updateEnabledClasses } = useDetectionSettingsSync();
+  const staffUser = isStaff(user);
+  const {
+    confThresh,
+    setConfThresh,
+    enabledClasses,
+    updateEnabledClasses,
+    emailAlerts,
+    setEmailAlerts,
+    alertCooldown,
+    setAlertCooldown,
+    resetDetectionSettings,
+    countActiveClasses,
+  } = useDetectionSettingsSync(staffUser);
 
   // Security
   const [twoFA, setTwoFA] = useState(() => user.two_factor_enabled === 1 || localStorage.getItem('twoFA') === 'true');
@@ -199,19 +217,7 @@ const Settings = () => {
   };
 
   useEffect(() => {
-    fetch('/api/detection/settings')
-      .then((r) => r.json())
-      .then((data) => {
-        if (typeof data.email_alerts === 'boolean') setEmailAlerts(data.email_alerts);
-        if (data.alert_cooldown !== null && data.alert_cooldown !== undefined) {
-          setAlertCooldown(Number(data.alert_cooldown));
-        }
-      })
-      .catch(() => {});
-  }, [setAlertCooldown, setEmailAlerts]);
-
-  useEffect(() => {
-    if (!isStaff(user)) return;
+    if (!staffUser) return;
     apiFetch('/api/settings/smtp')
       .then((r) => r.json())
       .then((data) => {
@@ -220,21 +226,7 @@ const Settings = () => {
         if (typeof data.smtp_password_set === 'boolean') setSmtpPasswordSet(data.smtp_password_set);
       })
       .catch(() => {});
-  }, [user.role]);
-
-  useEffect(() => {
-    const t = setTimeout(() => {
-      fetch('/api/detection/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email_alerts: emailAlerts,
-          alert_cooldown: alertCooldown,
-        }),
-      }).catch(() => {});
-    }, 300);
-    return () => clearTimeout(t);
-  }, [emailAlerts, alertCooldown]);
+  }, [user.role, staffUser]);
 
   useEffect(() => {
     const t = setInterval(() => {
@@ -547,7 +539,7 @@ const Settings = () => {
               </div>
               <div className="sov-card-body">
                 <div className="sov-card-label">Alert Channels</div>
-                <div className="sov-card-val">{[emailAlerts && 'Email', soundAlerts && 'Sound'].filter(Boolean).join(' + ') || 'All Off'}</div>
+                <div className="sov-card-val">{[staffUser && emailAlerts && 'Email', soundAlerts && 'Sound'].filter(Boolean).join(' + ') || 'All Off'}</div>
                 <div className="sov-card-sub">{alertCooldown}s cooldown</div>
               </div>
             </div>
@@ -559,7 +551,7 @@ const Settings = () => {
                 <div className="sov-card-body">
                   <div className="sov-card-label">Detection</div>
                   <div className="sov-card-val">{confThresh}% threshold</div>
-                  <div className="sov-card-sub">{Object.values(enabledClasses).filter(Boolean).length} classes active</div>
+                  <div className="sov-card-sub">{countActiveClasses} classes active</div>
                 </div>
               </div>
             ) : (
@@ -795,9 +787,15 @@ const Settings = () => {
                       <button
                         key={ac.val}
                         className="accent-dot"
-                        style={{ background: ac.val, boxShadow: `0 0 0 3px transparent` }}
+                        style={{
+                          background: ac.val,
+                          boxShadow: accentColor === ac.val ? `0 0 0 3px ${ac.val}55` : '0 0 0 3px transparent',
+                        }}
                         title={ac.name}
-                        onClick={() => document.documentElement.style.setProperty('--red', ac.val)}
+                        onClick={() => {
+                          applyAccentColor(ac.val);
+                          setAccentColor(ac.val);
+                        }}
                       >
                       </button>
                     ))}
@@ -817,10 +815,12 @@ const Settings = () => {
                 </div>
                 <div className="c-body">
                   <div className="section-hdr mb-3"><i className="fa-solid fa-toggle-on me-2"></i>Alert Channels</div>
-                  <SRow icon="fa-envelope-circle-check" iconBg="rgba(239,68,68,0.1)" iconColor="var(--red)" label="Email Alerts" desc="Send email notifications for each detection event">
-                    <Toggle checked={emailAlerts} onChange={setEmailAlerts} />
-                  </SRow>
-                  <SRow icon="fa-volume-high" iconBg="rgba(245,158,11,0.1)" iconColor="var(--amber)" label="Sound Alarms" desc="Play an audio alert when a violation is detected">
+                  {staffUser && (
+                    <SRow icon="fa-envelope-circle-check" iconBg="rgba(239,68,68,0.1)" iconColor="var(--red)" label="Email Alerts" desc="Send email notifications when the AI logs a violation">
+                      <Toggle checked={emailAlerts} onChange={setEmailAlerts} />
+                    </SRow>
+                  )}
+                  <SRow icon="fa-volume-high" iconBg="rgba(245,158,11,0.1)" iconColor="var(--amber)" label="Sound Alarms" desc="Play an audio alert on the dashboard when a new violation appears">
                     <Toggle checked={soundAlerts} onChange={setSoundAlerts} />
                   </SRow>
 
@@ -893,9 +893,14 @@ const Settings = () => {
                     <div className="d-flex justify-content-between" style={{ color: 'var(--tx3)', fontSize: '12px' }}>
                       <span>10s (aggressive)</span><span>5 min (quiet)</span>
                     </div>
+                    <div style={{ fontSize: '12px', color: 'var(--tx3)', marginTop: '8px' }}>
+                      {staffUser
+                        ? 'Controls violation logging, email alerts, and dashboard sound spacing.'
+                        : 'Controls how often dashboard sound alerts can replay.'}
+                    </div>
                   </div>
 
-                  {isStaff(user) && (
+                  {staffUser && (
                     <>
                       <div className="section-hdr mt-4 mb-3"><i className="fa-solid fa-server me-2"></i>SMTP Configuration</div>
                       <div className="row g-3 mb-3">
@@ -967,8 +972,7 @@ const Settings = () => {
 
                   <div className="section-hdr mb-3"><i className="fa-solid fa-robot me-2"></i>Active Detection Classes</div>
                   <div className="class-card-grid mb-4">
-                    {MODELS.filter(m => m.label !== 'Face ID').map(m => {
-                      const key = m.label.toLowerCase();
+                    {DETECTION_CLASSES.map(({ key, label, color, model }) => {
                       const on = enabledClasses[key] !== false;
                       return (
                         <div
@@ -978,12 +982,12 @@ const Settings = () => {
                             const updated = { ...enabledClasses, [key]: !on };
                             updateEnabledClasses(updated);
                           }}
-                          style={{ borderColor: on ? m.color : 'var(--border)' }}
+                          style={{ borderColor: on ? color : 'var(--border)' }}
                         >
-                          <div className="class-card-dot" style={{ background: m.color }}></div>
-                          <div className="class-card-label">{m.label}</div>
-                          <div className="class-card-file">{m.name}</div>
-                          <div className="class-card-status" style={{ color: on ? m.color : 'var(--tx3)' }}>
+                          <div className="class-card-dot" style={{ background: color }}></div>
+                          <div className="class-card-label">{label}</div>
+                          <div className="class-card-file">{model}</div>
+                          <div className="class-card-status" style={{ color: on ? color : 'var(--tx3)' }}>
                             <i className={`fa-solid ${on ? 'fa-circle-check' : 'fa-circle-xmark'} me-1`}></i>
                             {on ? 'Active' : 'Disabled'}
                           </div>
@@ -992,20 +996,17 @@ const Settings = () => {
                     })}
                   </div>
 
-                  {/* ── Dependency warning banner ── */}
                   {(() => {
                     const smokeOn = enabledClasses.smoke !== false;
-                    const cigOn   = enabledClasses.cigarette !== false;
-                    const vapeOn  = enabledClasses.vape !== false;
+                    const cigOn = enabledClasses.cigarette !== false;
+                    const vapeOn = enabledClasses.vape !== false;
                     const anyActive = smokeOn || cigOn || vapeOn;
 
-                    // Nothing enabled at all
                     if (!anyActive) return (
                       <div style={{
                         display: 'flex', alignItems: 'flex-start', gap: '12px',
                         background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.35)',
                         borderRadius: '12px', padding: '12px 14px', marginBottom: '20px',
-                        animation: 'fadeIn 0.2s ease-out'
                       }}>
                         <i className="fa-solid fa-ban" style={{ color: 'var(--red)', marginTop: '2px', fontSize: '15px', flexShrink: 0 }}></i>
                         <div>
@@ -1013,41 +1014,36 @@ const Settings = () => {
                             No classes active — detection is off
                           </div>
                           <div style={{ fontSize: '12px', color: 'var(--tx2)', lineHeight: 1.5 }}>
-                            All detection classes are disabled. Enable at least <strong>Smoke</strong> to allow any violation to be logged.
+                            Enable at least one class. For cigarette/vape alerts, keep <strong>Smoke</strong> on so pens and fingers are not logged as violations.
                           </div>
                         </div>
                       </div>
                     );
 
-                    // Smoke disabled but cigarette or vape is on — they'll never fire
                     if (!smokeOn && (cigOn || vapeOn)) return (
                       <div style={{
                         display: 'flex', alignItems: 'flex-start', gap: '12px',
                         background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.4)',
                         borderRadius: '12px', padding: '12px 14px', marginBottom: '20px',
-                        animation: 'fadeIn 0.2s ease-out'
                       }}>
                         <i className="fa-solid fa-triangle-exclamation" style={{ color: 'var(--amber)', marginTop: '2px', fontSize: '15px', flexShrink: 0 }}></i>
                         <div>
                           <div style={{ fontWeight: 700, fontSize: '13px', color: 'var(--amber)', marginBottom: '3px' }}>
-                            {[cigOn && 'Cigarette', vapeOn && 'Vape'].filter(Boolean).join(' & ')} will never trigger — Smoke is disabled
+                            {[cigOn && 'Cigarette', vapeOn && 'Vape'].filter(Boolean).join(' & ')} will log without smoke proof
                           </div>
                           <div style={{ fontSize: '12px', color: 'var(--tx2)', lineHeight: 1.5 }}>
-                            The AI requires <strong>corroborating smoke evidence</strong> before logging a cigarette or vape violation
-                            (to prevent false positives from pens, fingers, etc.).
-                            Re-enable <strong>Smoke</strong>, or rely on smoke-only detection.
+                            With Smoke disabled, objects like pens or fingers can be logged as violations.
+                            Re-enable <strong>Smoke</strong> to require corroborating smoke before a cigarette/vape ticket is created.
                           </div>
                         </div>
                       </div>
                     );
 
-                    // Smoke only — informational
                     if (smokeOn && !cigOn && !vapeOn) return (
                       <div style={{
                         display: 'flex', alignItems: 'flex-start', gap: '12px',
                         background: 'rgba(59,130,246,0.07)', border: '1px solid rgba(59,130,246,0.3)',
                         borderRadius: '12px', padding: '12px 14px', marginBottom: '20px',
-                        animation: 'fadeIn 0.2s ease-out'
                       }}>
                         <i className="fa-solid fa-circle-info" style={{ color: 'var(--blue)', marginTop: '2px', fontSize: '15px', flexShrink: 0 }}></i>
                         <div>
@@ -1055,14 +1051,33 @@ const Settings = () => {
                             Smoke-only mode active
                           </div>
                           <div style={{ fontSize: '12px', color: 'var(--tx2)', lineHeight: 1.5 }}>
-                            Only visible smoke clouds will trigger alerts (threshold ≥ 70%). 
-                            Cigarette and vape objects without smoke will be ignored.
+                            Only visible smoke clouds will trigger alerts (threshold ≥ 68%).
+                            Cigarette and vape objects without smoke stay as orange suspects only.
                           </div>
                         </div>
                       </div>
                     );
 
-                    return null; // normal state — no warning needed
+                    if (smokeOn && (cigOn || vapeOn)) return (
+                      <div style={{
+                        display: 'flex', alignItems: 'flex-start', gap: '12px',
+                        background: 'rgba(16,185,129,0.07)', border: '1px solid rgba(16,185,129,0.3)',
+                        borderRadius: '12px', padding: '12px 14px', marginBottom: '20px',
+                      }}>
+                        <i className="fa-solid fa-circle-check" style={{ color: 'var(--green)', marginTop: '2px', fontSize: '15px', flexShrink: 0 }}></i>
+                        <div>
+                          <div style={{ fontWeight: 700, fontSize: '13px', color: 'var(--green)', marginBottom: '3px' }}>
+                            Corroborated mode — recommended
+                          </div>
+                          <div style={{ fontSize: '12px', color: 'var(--tx2)', lineHeight: 1.5 }}>
+                            Cigarette/vape stay orange <strong>SUSPECT</strong> until smoke appears near the face/upper body — not directly on the object box.
+                            Background haze elsewhere still will not confirm a violation.
+                          </div>
+                        </div>
+                      </div>
+                    );
+
+                    return null;
                   })()}
 
                   <div className="section-hdr mb-3"><i className="fa-solid fa-gauge me-2"></i>Throttle & Capture</div>
@@ -1076,7 +1091,7 @@ const Settings = () => {
                       <span>1 FPS (lighter)</span><span>60 FPS (smoother)</span>
                     </div>
                   </div>
-                  <SRow icon="fa-camera" iconBg="rgba(168,85,247,0.1)" iconColor="var(--purple)" label="Auto-capture screenshot" desc="Save a JPEG snapshot for every detection event">
+                  <SRow icon="fa-camera" iconBg="rgba(168,85,247,0.1)" iconColor="var(--purple)" label="Webcam AI upload" desc="Send your webcam frames to the server for live smoking detection">
                     <Toggle checked={autoCapture} onChange={setAutoCapture} />
                   </SRow>
                 </div>
@@ -1159,7 +1174,7 @@ const Settings = () => {
 
                   <div className="section-hdr mb-3"><i className="fa-solid fa-brain me-2"></i>Loaded Models</div>
                   <div className="model-list">
-                    {MODELS.map(m => (
+                    {LOADED_MODELS.map(m => (
                       <div key={m.name} className="model-row">
                         <div className="model-dot" style={{ background: m.color }}></div>
                         <div className="model-info">
@@ -1190,13 +1205,21 @@ const Settings = () => {
                     </div>
                     <button className="btn-danger-outline" onClick={() => {
                       setConfirmMessage("Are you sure you want to reset all platform configurations to factory defaults? Your user profile and logged violations will not be changed.");
-                      setConfirmCallback(() => () => {
+                      setConfirmCallback(() => async () => {
                         localStorage.removeItem('accentColor');
-                        localStorage.removeItem('theme');
+                        document.documentElement.style.setProperty('--red', '#ef4444');
+                        setAccentColor('#ef4444');
                         setTheme('dark');
-                        setConfThresh(50);
-                        setThrottle(3);
-                        setAlertCooldown(60);
+                        setThrottle(DEFAULT_WEBCAM_FPS);
+                        setAutoCapture(true);
+                        setSoundAlerts(true);
+                        setAlarmTone('high_beep');
+                        setCompactMode(false);
+                        if (staffUser) {
+                          await resetDetectionSettings();
+                        } else {
+                          setAlertCooldown(60);
+                        }
                         showToast('Settings reset to defaults');
                       });
                       setShowConfirmModal(true);

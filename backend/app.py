@@ -11,7 +11,7 @@ import urllib.parse
 import numpy as np
 import cv2
 from werkzeug.security import generate_password_hash, check_password_hash
-from database import init_db, get_app_setting, set_app_setting, bootstrap_roles
+from database import init_db, get_app_setting, set_app_setting, bootstrap_roles, mark_user_violations_paid
 from config import AUTH_CODE_EXPIRY_MINUTES, DB_PATH, API_PORT, FLASK_DEBUG, SUPERVISOR_GRANT_TTL_MINUTES
 from auth_codes import (
     PURPOSE_DISABLE_2FA,
@@ -577,15 +577,16 @@ def _build_users_list():
         uid, name, email, role, created_at, account_status, suspended_at, suspend_reason, two_fa = u
         role = normalize_role(role)
         vcount = conn.execute(
-            "SELECT COUNT(*) FROM violations WHERE person_name = ?", (name,)
+            "SELECT COUNT(*) FROM violations WHERE person_name = ? OR user_id = ?",
+            (name, uid),
         ).fetchone()[0]
         top_loc = conn.execute(
-            "SELECT location FROM violations WHERE person_name = ? GROUP BY location ORDER BY COUNT(*) DESC LIMIT 1",
-            (name,)
+            "SELECT location FROM violations WHERE person_name = ? OR user_id = ? GROUP BY location ORDER BY COUNT(*) DESC LIMIT 1",
+            (name, uid),
         ).fetchone()
         last_v = conn.execute(
-            "SELECT timestamp FROM violations WHERE person_name = ? ORDER BY id DESC LIMIT 1",
-            (name,)
+            "SELECT timestamp FROM violations WHERE person_name = ? OR user_id = ? ORDER BY id DESC LIMIT 1",
+            (name, uid),
         ).fetchone()
         result.append({
             "id": uid, "name": name, "email": email, "role": role,
@@ -894,12 +895,15 @@ def api_violations(user):
     conn = _connect_db()
     if is_staff(user):
         rows = conn.execute(
-            "SELECT id, timestamp, image_path, person_name, location, detected_type FROM violations ORDER BY id DESC LIMIT ?",
+            """SELECT id, timestamp, image_path, person_name, location, detected_type, user_id,
+                      COALESCE(paid, 0)
+               FROM violations ORDER BY id DESC LIMIT ?""",
             (limit,),
         ).fetchall()
     else:
         rows = conn.execute(
-            """SELECT id, timestamp, image_path, person_name, location, detected_type
+            """SELECT id, timestamp, image_path, person_name, location, detected_type, user_id,
+                      COALESCE(paid, 0)
                FROM violations
                WHERE person_name = ? OR user_id = ?
                ORDER BY id DESC LIMIT ?""",
@@ -913,7 +917,25 @@ def api_violations(user):
         'name': r[3] or 'Unknown',
         'location': r[4] or 'Unknown',
         'detected_type': r[5] or 'unknown',
+        'user_id': r[6],
+        'paid': bool(r[7]),
+        'fine_amount': 20,
     } for r in rows])
+
+
+@app.route('/api/violations/pay', methods=['POST'])
+@require_auth
+def pay_violations(user):
+    """Mark the current user's unpaid violations as paid ($20 each)."""
+    if is_staff(user):
+        return jsonify({"status": "error", "message": "Staff accounts do not pay fines here"}), 400
+    updated = mark_user_violations_paid(user['id'])
+    log_audit(user, "violation.pay_fines", "user", user['id'], f"count={updated}")
+    return jsonify({
+        "status": "ok",
+        "paid_count": updated,
+        "amount": updated * 20,
+    })
 
 
 @app.route('/api/violations/<int:vid>/delete', methods=['POST'])
@@ -1226,7 +1248,7 @@ def upload_frame(user):
 
         location = data.get('location') or f"{username}'s Webcam"
         det.publish_user_stream_frame(username, frame)
-        det.queue_user_stream_detection(username, frame, location)
+        det.queue_user_stream_detection(username, frame, location, user_id=user['id'])
         return jsonify({"status": "success", "detected": False})
     except Exception as e:
         print(f"[Upload] Error from {username}: {e}")

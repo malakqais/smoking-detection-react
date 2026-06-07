@@ -28,7 +28,7 @@ const CameraGrid = ({ activeCams, currentTime, todayCount, detectionRunning, gpu
                 {cam.active ? (
                   <>
                     <img
-                      src={cam.isWebcam ? `/api/detection/video_feed_user/${encodeURIComponent(cam.userRef)}` : `/api/detection/video_feed/${i}`}
+                      src={cam.isWebcam ? `/api/detection/video_feed_user/${encodeURIComponent(cam.userRef)}` : `/api/detection/video_feed/${cam.feedId ?? i}`}
                       alt="Video Feed"
                       decoding="async"
                       fetchPriority="high"

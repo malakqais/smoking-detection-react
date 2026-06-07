@@ -43,7 +43,7 @@ def build_user_report_xlsx(uid):
         return None
     uid_, name, email, role, created_at = user
     violations = conn.execute(
-        """SELECT id, timestamp, location, person_name, detected_type, image_path
+        """SELECT id, timestamp, location, person_name, detected_type, image_path, COALESCE(paid, 0)
            FROM violations WHERE person_name = ? OR user_id = ?
            ORDER BY timestamp DESC""",
         (name, uid_),
@@ -76,6 +76,7 @@ def build_user_report_xlsx(uid):
         ("Joined", created_at or "—"),
         ("Account ID", f"UID-{uid_:04d}"),
         ("Total violations", len(violations)),
+        ("Unpaid fines", f"${sum(20 for v in violations if not v[6])}"),
         ("Top location", top_loc[0] if top_loc else "—"),
     ]
     row = 3
@@ -85,7 +86,7 @@ def build_user_report_xlsx(uid):
         row += 1
 
     row += 1
-    headers = ["#", "Violation ID", "Timestamp", "Location", "Detected type", "Evidence path"]
+    headers = ["#", "Violation ID", "Timestamp", "Location", "Detected type", "Fine", "Paid", "Evidence path"]
     for col, h in enumerate(headers, 1):
         cell = ws.cell(row=row, column=col, value=h)
         cell.fill = styles["header_fill"]
@@ -99,15 +100,17 @@ def build_user_report_xlsx(uid):
         ws.cell(row=row, column=2, value=v[0]).border = styles["border"]
         ws.cell(row=row, column=3, value=v[1]).border = styles["border"]
         ws.cell(row=row, column=4, value=v[2]).border = styles["border"]
-        ws.cell(row=row, column=5, value=v[3] or v[4]).border = styles["border"]
-        ws.cell(row=row, column=6, value=v[5] or "").border = styles["border"]
+        ws.cell(row=row, column=5, value=v[4] or v[3]).border = styles["border"]
+        ws.cell(row=row, column=6, value="$20.00").border = styles["border"]
+        ws.cell(row=row, column=7, value="Yes" if v[6] else "No").border = styles["border"]
+        ws.cell(row=row, column=8, value=v[5] or "").border = styles["border"]
         row += 1
 
     if not violations:
-        ws.merge_cells(start_row=header_row + 1, start_column=1, end_row=header_row + 1, end_column=6)
+        ws.merge_cells(start_row=header_row + 1, start_column=1, end_row=header_row + 1, end_column=8)
         ws.cell(row=header_row + 1, column=1, value="No violations on record for this user.")
 
-    for col in range(1, 7):
+    for col in range(1, 9):
         ws.column_dimensions[get_column_letter(col)].width = 18
     ws.column_dimensions["C"].width = 22
 

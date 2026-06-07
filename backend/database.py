@@ -115,6 +115,7 @@ def _migrate():
         "ALTER TABLE users ADD COLUMN promoted_by INTEGER",
         "ALTER TABLE users ADD COLUMN login_notifications_enabled INTEGER DEFAULT 1",
         "ALTER TABLE violations ADD COLUMN user_id INTEGER",
+        "ALTER TABLE violations ADD COLUMN paid INTEGER DEFAULT 0",
         "ALTER TABLE violation_disputes ADD COLUMN manager_reviewer_id INTEGER",
         "ALTER TABLE violation_disputes ADD COLUMN manager_decision TEXT",
         "ALTER TABLE violation_disputes ADD COLUMN manager_note TEXT",
@@ -255,12 +256,27 @@ def insert_violation(
     cursor = conn.cursor()
     cursor.execute(
         """INSERT INTO violations
-           (timestamp, image_path, person_name, location, detected_type, user_id)
-           VALUES (?, ?, ?, ?, ?, ?)""",
+           (timestamp, image_path, person_name, location, detected_type, user_id, paid)
+           VALUES (?, ?, ?, ?, ?, ?, 0)""",
         (timestamp, image_path, person_name, location, detected_type, user_id),
     )
     conn.commit()
     conn.close()
+
+
+def mark_user_violations_paid(user_id):
+    """Mark all unpaid violations for a user as paid."""
+    if not user_id:
+        return 0
+    conn = _connect()
+    cur = conn.execute(
+        "UPDATE violations SET paid = 1 WHERE user_id = ? AND COALESCE(paid, 0) = 0",
+        (user_id,),
+    )
+    conn.commit()
+    updated = cur.rowcount
+    conn.close()
+    return updated
 
 
 def get_user_id_by_label(label):

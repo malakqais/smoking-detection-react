@@ -151,10 +151,13 @@ const Analytics = () => {
   const top5 = zoneCounts.slice(0, 5);
 
   const userViolations = useMemo(() => {
-    return violations.filter(v => 
-      v.name && v.name.toLowerCase().includes(user.name.toLowerCase().split(' ')[0])
-    );
-  }, [violations, user.name]);
+    if (isStaff(user)) {
+      return violations.filter((v) =>
+        v.name && v.name.toLowerCase().includes(user.name.toLowerCase().split(' ')[0])
+      );
+    }
+    return violations;
+  }, [violations, user.name, user.role]);
 
   const userTypeData = useMemo(() => {
     const counts = { cigarette: 0, vape: 0, smoke: 0 };

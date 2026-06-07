@@ -5,3 +5,10 @@ __pycache__/
 *.pyc
 .vite/
 VIRSION 1/venv/
+
+# Runtime violation evidence (keep folder, not images)
+backend/static/images/*.jpg
+
+# Large model artifacts (best.pt is tracked; skip duplicates and OpenVINO bin)
+00_model_weights/**/last_*.pt
+00_model_weights/**/*openvino*/*.bin

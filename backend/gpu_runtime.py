@@ -1,7 +1,7 @@
 """CUDA / multi-GPU device selection for YOLO inference."""
 import os
 
-MODEL_KEYS = ('person', 'cigarette', 'smoke', 'vape', 'face')
+MODEL_KEYS = ('person', 'cigarette_vape', 'smoke', 'face')
 
 _resolved_devices = None
 _primary_device = 'cpu'
