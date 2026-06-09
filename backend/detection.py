@@ -940,7 +940,7 @@ def recognize_face(face_crop):
             if dist < best_dist:
                 best_dist = dist
                 best_name = name
-        if best_dist < 0.85:
+        if best_dist < 1.2:
             print(f"[FaceNet] Recognized face as {best_name} (distance={best_dist:.3f})", flush=True)
             return best_name
     except Exception as e:

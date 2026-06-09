@@ -64,7 +64,12 @@ const SignUp = () => {
         setError(result.message || "Signup failed");
       }
     } catch (err) {
-      setError("Cannot connect to server. Make sure the backend is running.");
+      console.error("SignUp Error:", err);
+      if (err instanceof TypeError && err.message === "Failed to fetch") {
+        setError("Cannot connect to server. Make sure the backend is running.");
+      } else {
+        setError(err.message || "An unexpected error occurred during signup.");
+      }
     } finally {
       setLoading(false);
     }

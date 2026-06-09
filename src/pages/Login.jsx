@@ -309,7 +309,12 @@ const Login = () => {
         setError(result.message || "Invalid email or password.");
       }
     } catch (err) {
-      setError("Cannot connect to server. Make sure the backend is running.");
+      console.error("Login Error:", err);
+      if (err instanceof TypeError && err.message === "Failed to fetch") {
+        setError("Cannot connect to server. Make sure the backend is running.");
+      } else {
+        setError(err.message || "An unexpected error occurred during login.");
+      }
     } finally {
       setLoading(false);
     }
