@@ -17,8 +17,10 @@ const avatarColor = (role) => {
   return 'linear-gradient(135deg,#3b82f6,#22d3ee)';
 };
 
-const initials = (name = '') =>
-  name.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2) || '?';
+const initials = (name = '') => {
+  if (typeof name !== 'string') return '?';
+  return name.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2) || '?';
+};
 
 const fmtDate = (str) => {
   if (!str) return '—';
@@ -131,7 +133,7 @@ const Admin = () => {
 
   const filtered = users.filter(u => {
     const q = search.toLowerCase();
-    const matchQ = !q || u.name?.toLowerCase().includes(q) || u.email?.toLowerCase().includes(q) || String(u.id).includes(q);
+    const matchQ = !q || String(u.name || '').toLowerCase().includes(q) || String(u.email || '').toLowerCase().includes(q) || String(u.id).includes(q);
     const matchR = roleFilter === 'all'
       || (roleFilter === 'suspended' ? u.status === 'suspended' : normalizeRole(u.role) === roleFilter);
     return matchQ && matchR;
@@ -143,7 +145,7 @@ const Admin = () => {
   const regular = users.filter(u => normalizeRole(u.role) === 'user').length;
   const suspended = users.filter(u => u.status === 'suspended').length;
   const totalViolations = users.reduce((s, u) => s + (u.violation_count || 0), 0);
-  const mostOffender = users.reduce((a, b) => (b.violation_count || 0) > (a.violation_count || 0) ? b : a, users[0] || {});
+  const mostOffender = users.length > 0 ? users.reduce((a, b) => (b.violation_count || 0) > (a.violation_count || 0) ? b : a, users[0]) : {};
   const isDark = theme === 'dark';
 
   return (

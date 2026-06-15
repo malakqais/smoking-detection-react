@@ -19,5 +19,18 @@
     "chart.js": "latest",
     "react-chartjs-2": "latest"
   },
-  "devDependencies": {}
+  "devDependencies": {},
+  "description": "A premium React-based dashboard coupled with a Flask backend and YOLOv8 machine learning models for real-time monitoring and management of smoking, vaping, and related violations.",
+  "main": "vite.config.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/malakqais/smoking-detection-react.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/malakqais/smoking-detection-react/issues"
+  },
+  "homepage": "https://github.com/malakqais/smoking-detection-react#readme"
 }
