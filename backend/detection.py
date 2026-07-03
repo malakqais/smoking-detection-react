@@ -667,7 +667,7 @@ def _detection_loop(camera_index, location):
         resolved_uid = None
         resolved_email = None
 
-        face_results = _predict('face', frame, conf=0.55)
+        face_results = _predict('face', frame, conf=0.45)
         for r in face_results:
             for box in r.boxes:
                 fx1, fy1, fx2, fy2 = map(int, box.xyxy[0])
@@ -940,7 +940,7 @@ def recognize_face(face_crop):
             if dist < best_dist:
                 best_dist = dist
                 best_name = name
-        if best_dist < 1.2:
+        if best_dist < 1.1:
             print(f"[FaceNet] Recognized face as {best_name} (distance={best_dist:.3f})", flush=True)
             return best_name
     except Exception as e:
